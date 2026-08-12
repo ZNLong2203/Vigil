@@ -1,0 +1,61 @@
+{
+  "subject": "care-subject-001",
+  "synthetic": true,
+  "events": [
+    {
+      "at": "2026-08-03T09:00:00+00:00",
+      "department": "intake",
+      "summary": "Initial care plan recorded"
+    },
+    {
+      "at": "2026-08-04T09:00:00+00:00",
+      "department": "clinical",
+      "summary": "Home visit \u2014 Synthecillin 5 mg once daily confirmed"
+    },
+    {
+      "at": "2026-08-05T09:00:00+00:00",
+      "department": "clinical",
+      "summary": "Bloods collected at Meridian Community Laboratory"
+    },
+    {
+      "at": "2026-08-07T09:00:00+00:00",
+      "department": "document",
+      "summary": "Lab results received"
+    },
+    {
+      "at": "2026-08-09T09:00:00+00:00",
+      "department": "benefits",
+      "summary": "Northfield Mutual annual review letter received"
+    },
+    {
+      "at": "2026-08-12T09:00:00+00:00",
+      "department": "family",
+      "summary": "Carer note: difficulty with the 08:00 medication cluster"
+    },
+    {
+      "at": "2026-08-14T09:00:00+00:00",
+      "department": "clinical",
+      "summary": "Pharmacy confirmed Ferrogen / Osteoform D spacing advice"
+    },
+    {
+      "at": "2026-08-17T09:00:00+00:00",
+      "department": "appointment",
+      "summary": "Follow-up booked with attending practice"
+    },
+    {
+      "at": "2026-08-19T09:00:00+00:00",
+      "department": "clinical",
+      "summary": "Home visit \u2014 note records Synthecillin 10 mg once daily"
+    },
+    {
+      "at": "2026-08-21T09:00:00+00:00",
+      "department": "family",
+      "summary": "Carer asks which dose is current"
+    },
+    {
+      "at": "2026-08-23T09:00:00+00:00",
+      "department": "benefits",
+      "summary": "Form CC-12 still outstanding"
+    }
+  ]
+}

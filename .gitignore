@@ -1,0 +1,57 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Private strategy workspace — NEVER push. Judges read this repo.
+# ─────────────────────────────────────────────────────────────────────────────
+_strategy/
+STRATEGY.md
+scratch/
+notes/
+*.private.md
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Secrets — a leaked key here is both a security incident and a lost rubric point
+# ("secure credentials" is named in the Architectural Discipline criterion).
+# ─────────────────────────────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*-key.json
+*-credentials.json
+service-account*.json
+application_default_credentials.json
+.gcloud/
+
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+
+# ── Node / frontend ──────────────────────────────────────────────────────────
+node_modules/
+web/.next/
+web/out/
+web/.turbo/
+*.tsbuildinfo
+
+# ── Local emulator + run artifacts ───────────────────────────────────────────
+.data/
+tmp/
+*.log
+
+# ── Demo media (large; keep only compressed proof shots under docs_public/) ──
+recordings/
+*.mov
+*.mp4
+
+# ── OS / editor ──────────────────────────────────────────────────────────────
+.DS_Store
+.idea/
+*.swp
+.vscode/*
+!.vscode/extensions.json

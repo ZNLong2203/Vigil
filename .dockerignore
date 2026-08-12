@@ -1,0 +1,30 @@
+# Private strategy workspace must never reach a container image
+_strategy/
+STRATEGY.md
+
+# Secrets
+.env
+.env.*
+!.env.example
+*-key.json
+*credentials*.json
+
+.git/
+.github/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+node_modules/
+web/dist/
+
+docs/
+tests/
+recordings/
+*.mov
+*.mp4
+.DS_Store

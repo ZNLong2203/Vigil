@@ -1,0 +1,74 @@
+{
+  "subject": "care-subject-001",
+  "medications": [
+    {
+      "name": "Synthecillin",
+      "dose": "5 mg",
+      "times": [
+        "08:00"
+      ],
+      "with_food": true
+    },
+    {
+      "name": "Cardiolex",
+      "dose": "20 mg",
+      "times": [
+        "08:00",
+        "20:00"
+      ],
+      "with_food": false
+    },
+    {
+      "name": "Neurovast",
+      "dose": "100 mg",
+      "times": [
+        "08:00"
+      ],
+      "with_food": true
+    },
+    {
+      "name": "Hepatrin",
+      "dose": "250 mg",
+      "times": [
+        "12:00"
+      ],
+      "with_food": true
+    },
+    {
+      "name": "Osteoform D",
+      "dose": "800 IU",
+      "times": [
+        "12:00"
+      ],
+      "with_food": true
+    },
+    {
+      "name": "Somnalex",
+      "dose": "3 mg",
+      "times": [
+        "22:00"
+      ],
+      "with_food": false
+    },
+    {
+      "name": "Ferrogen",
+      "dose": "65 mg",
+      "times": [
+        "08:00"
+      ],
+      "with_food": false,
+      "note": "absorption reduced when taken with Osteoform D"
+    },
+    {
+      "name": "Pulmaire",
+      "dose": "2 puffs",
+      "times": [
+        "08:00",
+        "14:00",
+        "20:00"
+      ],
+      "with_food": false
+    }
+  ],
+  "synthetic": true
+}

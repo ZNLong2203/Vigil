@@ -1,0 +1,269 @@
+"""One event, through the whole fleet.
+
+    orchestrator plans → workers act → watchdog verifies → escalate or finish
+
+Three things make this more than a for-loop over agents.
+
+**Every hop is a checkpointed step.** Not for elegance: an agent hop costs 10-30
+seconds and a Cloud Run instance can be replaced mid-flight. Without a checkpoint
+per hop, a redelivery re-runs the whole chain from the top and pays for it twice.
+With one, a resumed run skips what already happened — the same idempotency
+machinery that stops a duplicate benefits filing also stops a duplicate LLM bill.
+
+**The budget is shared across the chain, not per agent.** A run that spends its
+whole allowance on planning has nothing left to verify with, and the honest
+outcome is a truncated run that says so — not three agents that each stayed
+politely under their own limit while the run as a whole ran away.
+
+**The watchdog runs last and can override.** A verified-false verdict does not
+delete the work; it escalates it with the reasoning attached. An agent that
+cannot be overruled is not supervised.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import os
+from dataclasses import dataclass, field
+from typing import Any
+
+from vigil.fleet.budget import RunBudget
+from vigil.fleet.registry import lookup
+from vigil.fleet.run import AgentRun, run_agent
+from vigil.state import StepAlreadyDone, audit, claim_step, complete_step, fail_step
+from vigil.telemetry import log, span
+
+_log = log("vigil.pipeline")
+
+#: Hard ceiling on delegations honoured from one plan. The orchestrator is
+#: instructed to delegate narrowly; this is what happens when it does not.
+MAX_DELEGATIONS = 3
+
+
+@dataclass(slots=True)
+class PipelineResult:
+    run_id: str
+    plan: AgentRun | None = None
+    workers: list[AgentRun] = field(default_factory=list)
+    verdict: AgentRun | None = None
+    escalated: bool = False
+    stopped_by: str | None = None
+
+    @property
+    def agent_runs(self) -> list[AgentRun]:
+        return [r for r in [self.plan, *self.workers, self.verdict] if r]
+
+    @property
+    def total_tokens(self) -> int:
+        return sum(r.tokens for r in self.agent_runs)
+
+    @property
+    def denials(self) -> list[Any]:
+        return [call for r in self.agent_runs for call in r.denials]
+
+    def summary(self) -> str:
+        parts = [
+            f"{len(self.agent_runs)} agents",
+            f"{self.total_tokens} tokens",
+            f"{sum(r.elapsed_s for r in self.agent_runs):.1f}s",
+        ]
+        if self.denials:
+            parts.append(f"{len(self.denials)} boundary denials")
+        if self.escalated:
+            parts.append("escalated")
+        if self.stopped_by:
+            parts.append(f"stopped by {self.stopped_by}")
+        return " · ".join(parts)
+
+
+async def orchestrate(event: dict[str, Any], budget: RunBudget) -> PipelineResult:
+    """Run one event through the fleet."""
+    run_id = budget.run_id
+    result = PipelineResult(run_id=run_id)
+
+    with span("pipeline.orchestrate", run_id=run_id, kind=event.get("kind")):
+        # ── Plan ─────────────────────────────────────────────────────────────
+        result.plan = await _step(run_id, "plan", "orchestrator", _plan_prompt(event), budget)
+        if result.plan is None:
+            result.stopped_by = "plan_step_replayed"
+            return result
+        if result.plan.stopped_by:
+            result.stopped_by = result.plan.stopped_by
+            return result
+
+        plan = result.plan.output
+        if plan is None:
+            # A plan that will not parse is not a plan. Escalating beats guessing
+            # at what the orchestrator meant.
+            audit("plan.unparseable", actor="orchestrator", decision="escalated", run_id=run_id)
+            result.escalated = True
+            return result
+
+        if not plan.delegations:
+            audit(
+                "plan.no_action",
+                actor="orchestrator",
+                decision="done",
+                run_id=run_id,
+                reason=plan.stop_reason or "nothing to do",
+            )
+            return result
+
+        # ── Delegate ─────────────────────────────────────────────────────────
+        for index, delegation in enumerate(plan.delegations[:MAX_DELEGATIONS]):
+            try:
+                entry = lookup(delegation.agent)
+            except KeyError:
+                # The orchestrator named an agent that does not exist. That is a
+                # hallucination with a plan attached, and the registry is the
+                # only thing standing between it and a real call.
+                audit(
+                    "delegation.unknown_agent",
+                    actor="orchestrator",
+                    decision="denied",
+                    run_id=run_id,
+                    requested=delegation.agent,
+                )
+                continue
+
+            if not entry.may_be_called_by("orchestrator"):
+                audit(
+                    "delegation.not_permitted",
+                    actor="orchestrator",
+                    decision="denied",
+                    run_id=run_id,
+                    requested=delegation.agent,
+                )
+                continue
+
+            worker = await _step(
+                run_id,
+                f"delegate-{index}-{entry.name}",
+                entry.name,
+                _worker_prompt(event, delegation),
+                budget,
+            )
+            if worker is None:
+                continue
+            result.workers.append(worker)
+            if worker.stopped_by:
+                result.stopped_by = worker.stopped_by
+                break
+
+        # ── Verify ───────────────────────────────────────────────────────────
+        if result.workers and not result.stopped_by:
+            result.verdict = await _step(
+                run_id, "verify", "watchdog", _verify_prompt(event, result.workers), budget
+            )
+            verdict = result.verdict.output if result.verdict else None
+            if verdict and (verdict.escalate or not verdict.verified):
+                result.escalated = True
+                audit(
+                    "watchdog.escalated",
+                    actor="watchdog",
+                    decision="escalated",
+                    run_id=run_id,
+                    unsupported=len(verdict.unsupported_claims),
+                    contradictions=len(verdict.contradictions),
+                )
+
+    _log.info("pipeline.finished", run_id=run_id, summary=result.summary())
+    return result
+
+
+async def _step(
+    run_id: str, step_id: str, agent: str, prompt: str, budget: RunBudget
+) -> AgentRun | None:
+    """One agent hop, guarded by the same checkpoint machinery as any side effect.
+
+    Returns None when the step was already done — a redelivery, not a failure.
+    """
+    payload = {"agent": agent, "prompt_digest": _stable_digest(prompt)}
+    try:
+        key = claim_step(run_id, step_id, payload)
+    except StepAlreadyDone:
+        audit("agent.step_replayed", actor=agent, decision="skipped", run_id=run_id, step=step_id)
+        return None
+
+    # Demo affordance, off unless explicitly set. This is the exact window the
+    # design turns on — the claim is held, the work has not happened — so it is
+    # the window `make chaos` has to kill the process inside. Real agent work
+    # occupies it for 10-30 seconds on its own; the delay only makes the moment
+    # reproducible on camera.
+    delay_ms = int(os.environ.get("VIGIL_DEMO_DELAY_MS", "0"))
+    if delay_ms:
+        _log.info(
+            "demo.delay",
+            run_id=run_id,
+            step=step_id,
+            ms=delay_ms,
+            note="claim held, work not yet done — safe to kill now",
+        )
+        await asyncio.sleep(delay_ms / 1000)
+
+    try:
+        run = await run_agent(agent, prompt, budget)
+    except Exception as exc:
+        fail_step(run_id, step_id, key, str(exc))
+        audit("agent.failed", actor=agent, decision="failed", run_id=run_id, error=str(exc)[:200])
+        raise
+
+    complete_step(
+        run_id,
+        step_id,
+        key,
+        {"tokens": run.tokens, "elapsed_s": run.elapsed_s, "tools": len(run.tool_calls)},
+    )
+    budget.spend_step()
+    return run
+
+
+def _stable_digest(text: str) -> str:
+    """Python's hash() is salted per process, so a resumed run in a new process
+    would compute a different idempotency payload for the same prompt and claim
+    the step again. That is the whole failure this design exists to prevent —
+    see ADR 002 and tests/test_idempotency.py."""
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+
+# ── Prompts ──────────────────────────────────────────────────────────────────
+#
+# Kept here rather than in agents.py because these are *per-run* context, while
+# the instructions in agents.py are the agent's standing character. Mixing the
+# two is how a system prompt slowly fills up with details of one event.
+
+
+def _plan_prompt(event: dict[str, Any]) -> str:
+    return (
+        f"An event arrived for care subject {event.get('subject', 'unknown')}.\n\n"
+        f"kind: {event.get('kind')}\n"
+        f"source_uri: {event.get('source_uri') or '(none)'}\n"
+        f"body: {json.dumps(event.get('body', {}), indent=2)}\n\n"
+        "Decide who should handle it. Remember you cannot read the document "
+        "yourself — decide from what the event says about itself."
+    )
+
+
+def _worker_prompt(event: dict[str, Any], delegation: Any) -> str:
+    return (
+        f"The orchestrator delegated this to you: {delegation.reason}\n\n"
+        f"subject: {event.get('subject')}\n"
+        f"source_uri: {event.get('source_uri') or '(none)'}\n"
+        f"context: {delegation.input_summary}\n\n"
+        "Do your part and nothing else. If the work needs a capability you do "
+        "not hold, say so rather than working around it."
+    )
+
+
+def _verify_prompt(event: dict[str, Any], workers: list[AgentRun]) -> str:
+    reports = "\n\n".join(
+        f"--- {w.agent} (run {w.run_id}) ---\n{w.raw_text[:3000]}" for w in workers
+    )
+    return (
+        f"Verify the following agent output for subject {event.get('subject')}, "
+        f"run {workers[0].run_id}.\n\n{reports}\n\n"
+        "Check each claim against the persisted record. Report contradictions "
+        "without resolving them. Escalate if a human needs to decide."
+    )
