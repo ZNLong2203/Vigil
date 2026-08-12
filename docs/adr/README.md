@@ -16,3 +16,4 @@ usually two decisions wearing a trenchcoat.
 | [008](008-two-layer-scope-enforcement.md) | Scope enforcement in two layers, not in the prompt | accepted |
 | [009](009-redact-before-screening.md) | Redact before screening, not after | accepted |
 | [010](010-hard-rules-before-confidence.md) | Hard policy rules run before confidence rules | accepted |
+| [011](011-two-model-backends.md) | Two model backends, deliberately | accepted |

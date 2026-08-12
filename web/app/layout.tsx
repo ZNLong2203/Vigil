@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
+import { FleetPulse } from "@/components/FleetPulse";
 import { Nav } from "@/components/Nav";
 import { StatusBar } from "@/components/StatusBar";
 
@@ -22,7 +23,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       <body className="min-h-full flex flex-col">
         <header className="flex items-center gap-4 px-4 h-12 border-b border-[var(--line-soft)] shrink-0">
           <div className="flex items-center gap-2.5">
-            <span className="live-dot" aria-hidden />
+            <FleetPulse />
             <span className="mono text-sm tracking-[0.18em] uppercase">Vigil</span>
           </div>
           <Nav />

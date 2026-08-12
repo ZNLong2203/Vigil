@@ -4,12 +4,13 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 
 /**
- * Two caregiver surfaces, one decision surface, two operator surfaces. Fleet
- * earns its place by being a category requirement — agents have to be
- * discoverable across departments — not by being another view of the same data.
+ * Overview first, because a reader arriving cold needs to be told what this is
+ * before being shown any of it. Then two caregiver surfaces, one decision
+ * surface, and two operator surfaces.
  */
 const LINKS = [
-  { href: "/", label: "Timeline" },
+  { href: "/", label: "Overview" },
+  { href: "/timeline/", label: "Timeline" },
   { href: "/intake/", label: "Intake" },
   { href: "/approvals/", label: "Approvals" },
   { href: "/fleet/", label: "Fleet" },

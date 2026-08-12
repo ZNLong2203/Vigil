@@ -3,6 +3,8 @@
 # ─────────────────────────────────────────────────────────────────────────────
 _strategy/
 STRATEGY.md
+# Contains real resource names, project ids and credential locations.
+TEARDOWN.md
 scratch/
 notes/
 *.private.md

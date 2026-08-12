@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import mimetypes
 import os
 from dataclasses import dataclass, field
 from typing import Any
@@ -32,7 +33,16 @@ from typing import Any
 from vigil.fleet.budget import RunBudget
 from vigil.fleet.registry import lookup
 from vigil.fleet.run import AgentRun, run_agent
-from vigil.state import StepAlreadyDone, audit, claim_step, complete_step, fail_step
+from vigil.state import (
+    StepAlreadyDone,
+    audit,
+    claim_step,
+    complete_step,
+    fail_step,
+    reset_current_run,
+    set_current_run,
+)
+from vigil.storage import resolve
 from vigil.telemetry import log, span
 
 _log = log("vigil.pipeline")
@@ -82,6 +92,20 @@ async def orchestrate(event: dict[str, Any], budget: RunBudget) -> PipelineResul
     """Run one event through the fleet."""
     run_id = budget.run_id
     result = PipelineResult(run_id=run_id)
+
+    # Everything below — including tools called by the model, which have no way
+    # to know the run — records against this run.
+    token = set_current_run(run_id)
+    try:
+        return await _orchestrate(event, budget, result)
+    finally:
+        reset_current_run(token)
+
+
+async def _orchestrate(
+    event: dict[str, Any], budget: RunBudget, result: PipelineResult
+) -> PipelineResult:
+    run_id = budget.run_id
 
     with span("pipeline.orchestrate", run_id=run_id, kind=event.get("kind")):
         # ── Plan ─────────────────────────────────────────────────────────────
@@ -144,6 +168,7 @@ async def orchestrate(event: dict[str, Any], budget: RunBudget) -> PipelineResul
                 entry.name,
                 _worker_prompt(event, delegation),
                 budget,
+                attachments=_attachments(event),
             )
             if worker is None:
                 continue
@@ -174,7 +199,13 @@ async def orchestrate(event: dict[str, Any], budget: RunBudget) -> PipelineResul
 
 
 async def _step(
-    run_id: str, step_id: str, agent: str, prompt: str, budget: RunBudget
+    run_id: str,
+    step_id: str,
+    agent: str,
+    prompt: str,
+    budget: RunBudget,
+    *,
+    attachments: list[tuple[bytes, str]] | None = None,
 ) -> AgentRun | None:
     """One agent hop, guarded by the same checkpoint machinery as any side effect.
 
@@ -204,7 +235,7 @@ async def _step(
         await asyncio.sleep(delay_ms / 1000)
 
     try:
-        run = await run_agent(agent, prompt, budget)
+        run = await run_agent(agent, prompt, budget, attachments=attachments)
     except Exception as exc:
         fail_step(run_id, step_id, key, str(exc))
         audit("agent.failed", actor=agent, decision="failed", run_id=run_id, error=str(exc)[:200])
@@ -218,6 +249,44 @@ async def _step(
     )
     budget.spend_step()
     return run
+
+
+def _attachments(event: dict[str, Any]) -> list[tuple[bytes, str]]:
+    """Load a photo or voice note so it travels with the agent's message.
+
+    Only binaries. A PDF stays on the tool path, because its text has to cross
+    the trust boundary first — attaching one directly would route an injected
+    document straight into the prompt, past the screen that exists to catch it.
+
+    A missing artifact returns nothing rather than raising: the agent still gets
+    the prompt and will say the record does not support a claim, which is a
+    better outcome than a failed run.
+    """
+    source_uri = event.get("source_uri")
+    if not source_uri:
+        return []
+
+    # Decide from the name before fetching anything. Fetching first and then
+    # discarding non-binaries meant every PDF delegation paid for a Cloud Storage
+    # round-trip to learn it was a PDF — latency and cost on the hot path, for an
+    # answer already visible in the filename.
+    guessed = mimetypes.guess_type(source_uri)[0] or ""
+    if not guessed.startswith(("image/", "audio/")):
+        return []
+
+    try:
+        data, content_type = resolve(source_uri)
+    except Exception as exc:
+        _log.warning("attachment.unavailable", source_uri=source_uri, error=str(exc)[:120])
+        return []
+
+    if not content_type.startswith(("image/", "audio/")):
+        return []
+
+    _log.info(
+        "attachment.loaded", source_uri=source_uri, content_type=content_type, bytes=len(data)
+    )
+    return [(data, content_type)]
 
 
 def _stable_digest(text: str) -> str:

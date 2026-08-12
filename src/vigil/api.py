@@ -11,12 +11,13 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, UploadFile
 from fastapi.staticfiles import StaticFiles
 from google.cloud import firestore
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from pydantic import BaseModel, Field
 
+from vigil import storage
 from vigil.bus import ensure_subscription, publish
 from vigil.config import get_settings
 from vigil.state import audit, db, start_run
@@ -112,6 +113,45 @@ def ingest(event: EventIn) -> EventOut:
         return EventOut(run_id=run.run_id, message_id=message_id, trace_id=current_trace_id())
 
 
+class ArtifactOut(BaseModel):
+    source_uri: str
+    content_type: str
+    bytes: int
+
+
+@app.post("/artifacts", response_model=ArtifactOut, dependencies=[Depends(require_api_key)])
+async def upload_artifact(file: UploadFile) -> ArtifactOut:
+    """Store an uploaded photo, recording or document and return its URI.
+
+    Upload and processing are separate calls on purpose. A caregiver dropping a
+    photo should get an answer in the time it takes to store bytes, not the
+    minute it takes three agents to read them — so this returns a URI, and the
+    caller decides when to submit it as an event.
+
+    Storage is content-addressed, so dropping the same file twice yields the same
+    URI and the run that follows is recognised as a replay rather than repeating
+    the work.
+    """
+    data = await file.read()
+    try:
+        uri, content_type = storage.put(
+            file.filename or "artifact", data, file.content_type or None
+        )
+    except storage.ArtifactRejected as exc:
+        # 415, not 400: the request was well-formed, we will not accept this type.
+        raise HTTPException(status_code=415, detail=str(exc)) from exc
+
+    audit(
+        "artifact.uploaded",
+        actor="api",
+        decision="accepted",
+        source_uri=uri,
+        content_type=content_type,
+        bytes=len(data),
+    )
+    return ArtifactOut(source_uri=uri, content_type=content_type, bytes=len(data))
+
+
 # ── Read endpoints ───────────────────────────────────────────────────────────
 #
 # The UI polls these while a run is in flight. A full fleet run takes about a
@@ -158,6 +198,170 @@ def list_audit(run_id: str | None = None, limit: int = 100) -> dict[str, Any]:
         query = query.where("details.run_id", "==", run_id)
     query = query.order_by("at", direction=firestore.Query.DESCENDING).limit(min(limit, 500))
     return {"entries": [{"id": d.id, **(d.to_dict() or {})} for d in query.stream()]}
+
+
+class DigestRequest(BaseModel):
+    subject: str = "care-subject-001"
+    days: int = 7
+    #: Video takes minutes and the text takes seconds. A caller that wants an
+    #: answer now asks for one without it.
+    with_video: bool = False
+
+
+@app.post("/digest", dependencies=[Depends(require_api_key)])
+async def build_digest(request: DigestRequest) -> dict[str, Any]:
+    """Assemble the week for one care subject.
+
+    Called by Cloud Scheduler, not by a person. The digest is the one part of
+    this system that is genuinely periodic — everything else reacts to an event —
+    and a weekly note that has to be requested is a weekly note nobody reads.
+
+    Returns the text and reports what could not be rendered. The video and cues
+    are written to Cloud Storage rather than returned inline: a caregiver's
+    phone should fetch fifteen seconds of video when it wants to, not receive it
+    inside a JSON response.
+    """
+    from datetime import timedelta
+
+    from vigil import digest as digest_module
+    from vigil.state import now
+
+    since = now() - timedelta(days=request.days)
+    entries = [
+        {"id": d.id, **(d.to_dict() or {})}
+        for d in db().collection("audit").where("at", ">=", since).limit(200).stream()
+    ]
+    entries.sort(key=lambda e: str(e.get("at", "")))
+
+    urgency = (
+        digest_module.URGENT
+        if any(e.get("decision") == "blocked" for e in entries)
+        else digest_module.NEEDS_YOU
+        if any(e.get("decision") in {"escalated", "awaiting_approval"} for e in entries)
+        else digest_module.ROUTINE
+    )
+
+    result = await digest_module.build(
+        request.subject, entries, urgency=urgency, with_video=request.with_video
+    )
+
+    stored: dict[str, str] = {}
+    if result.video:
+        uri, _ = storage.put(f"digest-{request.subject}.mp4", result.video, "video/mp4")
+        stored["video"] = uri
+    for level, audio in result.cues.items():
+        uri, _ = storage.put(f"cue-{level}.wav", audio, "audio/wav")
+        stored[f"cue_{level}"] = uri
+
+    audit(
+        "digest.built",
+        actor="scheduler",
+        decision="done",
+        subject=request.subject,
+        urgency=urgency,
+        events=len(entries),
+        missing=result.missing,
+    )
+
+    return {
+        "subject": request.subject,
+        "urgency": urgency,
+        "events_considered": len(entries),
+        "text": result.text,
+        "artifacts": stored,
+        "missing": result.missing,
+    }
+
+
+@app.get("/runs/{run_id}/trace", dependencies=[Depends(require_api_key)])
+def get_trace(run_id: str) -> dict[str, Any]:
+    """The reasoning chain for one run, as the trace view renders it.
+
+    Assembled from the audit trail rather than from Cloud Trace. Both record the
+    same run and they answer different questions: Cloud Trace has the timing and
+    the spans, the audit log has the *decisions* — which boundary refused a call,
+    why a step waited for a human. A caregiver looking at "why did this happen"
+    needs the second. The OpenTelemetry spans are still exported and still the
+    thing to open when the question is where the latency went.
+    """
+    run = db().collection("runs").document(run_id).get()
+    if not run.exists:
+        raise HTTPException(status_code=404, detail=f"no run {run_id}")
+
+    run_data = run.to_dict() or {}
+    entries = [
+        {"id": d.id, **(d.to_dict() or {})}
+        for d in db().collection("audit").where("details.run_id", "==", run_id).stream()
+    ]
+    entries.sort(key=lambda e: str(e.get("at", "")))
+
+    checkpoints = [
+        {"step_id": c.id, **(c.to_dict() or {})}
+        for c in db().collection("runs").document(run_id).collection("checkpoints").stream()
+    ]
+
+    return {
+        "run_id": run_id,
+        "trace_id": run_data.get("trace_id"),
+        "status": run_data.get("status"),
+        "kind": run_data.get("kind"),
+        "subject": run_data.get("subject"),
+        "created_at": run_data.get("created_at"),
+        "updated_at": run_data.get("updated_at"),
+        "steps": sorted(checkpoints, key=lambda c: str(c.get("started_at", ""))),
+        "entries": entries,
+    }
+
+
+@app.get("/registry", dependencies=[Depends(require_api_key)])
+def get_registry() -> dict[str, Any]:
+    """The catalogue, plus every version decision the eval gate has made.
+
+    The entries come from code and the version history from Firestore, which is
+    the honest split: what an agent *is* allowed to do is reviewed and deployed,
+    while what happened when it tried to improve itself is a runtime record. A
+    registry that let an agent widen its own scope at runtime would not be a
+    boundary at all.
+    """
+    from vigil.fleet.registry import FLEET
+
+    agents = []
+    for entry in FLEET:
+        versions = [
+            {"id": doc.id, **(doc.to_dict() or {})}
+            for doc in db()
+            .collection("registry")
+            .document(entry.name)
+            .collection("versions")
+            .stream()
+        ]
+        # Strip the instruction bodies: this endpoint is read by a browser, and
+        # a version record carries the full replacement prompt.
+        for version in versions:
+            version.pop("instruction", None)
+        versions.sort(key=lambda v: str(v.get("at", "")), reverse=True)
+
+        agents.append(
+            {
+                "name": entry.name,
+                "version": entry.version,
+                "owner": str(entry.owner),
+                "summary": entry.summary,
+                "accepts": entry.capability_input,
+                "returns": entry.capability_output,
+                "tool_scopes": [str(s) for s in entry.tool_scopes],
+                "callable_by": entry.callable_by,
+                "eval": {
+                    "suite": entry.eval.suite,
+                    "score": entry.eval.score,
+                    "cases": entry.eval.cases,
+                    "anti_gaming_passed": entry.eval.anti_gaming_passed,
+                },
+                "versions": versions,
+            }
+        )
+
+    return {"agents": agents}
 
 
 @app.get("/approvals", dependencies=[Depends(require_api_key)])

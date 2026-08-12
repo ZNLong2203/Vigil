@@ -198,3 +198,105 @@ def test_runtime_imports_are_not_dev_dependencies():
     # rather than at import — which is exactly why it needs asserting here.
     for module in ("pypdf", "python-dotenv"):
         assert module in runtime, f"{module} must be a runtime dependency, not a dev one"
+
+
+async def test_a_pdf_never_costs_a_storage_round_trip(harness, monkeypatch):
+    """_attachments once fetched every artifact and then discarded the ones that
+    were not images or audio — a Cloud Storage call per delegation to learn what
+    the filename already said. It also made the offline test suite hang.
+    """
+    fetched: list[str] = []
+    monkeypatch.setattr(pipe, "resolve", lambda uri: (fetched.append(uri), (b"", "text/plain"))[1])
+
+    harness["outputs"]["orchestrator"] = plan("intake-agent")
+    await orchestrate({**EVENT, "source_uri": "gs://x/note.pdf"}, RunBudget(run_id="r-1"))
+
+    assert fetched == [], "a PDF must be decided from its name, not by fetching it"
+
+
+async def test_an_image_is_attached_to_the_agents_message(harness, monkeypatch):
+    """Photos and voice notes cannot travel through a tool result — it is JSON on
+    the wire. They ride on the message itself."""
+    seen: list[list[tuple[bytes, str]] | None] = []
+
+    async def capture(name, prompt, budget, attachments=None, **kw):
+        seen.append(attachments)
+        return AgentRun(agent=name, run_id=budget.run_id, output=harness["outputs"].get(name))
+
+    monkeypatch.setattr(pipe, "resolve", lambda uri: (b"\x89PNG-bytes", "image/png"))
+    monkeypatch.setattr(pipe, "run_agent", capture)
+
+    harness["outputs"]["orchestrator"] = plan("intake-agent")
+    await orchestrate({**EVENT, "source_uri": "gs://x/pill-note-01.png"}, RunBudget(run_id="r-1"))
+
+    worker_attachments = seen[1]
+    assert worker_attachments == [(b"\x89PNG-bytes", "image/png")]
+
+
+async def test_a_missing_attachment_does_not_fail_the_run(harness, monkeypatch):
+    """The agent still gets the prompt and will say the record does not support a
+    claim, which beats losing the whole run to a 404."""
+
+    def boom(uri):
+        raise FileNotFoundError(uri)
+
+    monkeypatch.setattr(pipe, "resolve", boom)
+    harness["outputs"]["orchestrator"] = plan("intake-agent")
+
+    result = await orchestrate({**EVENT, "source_uri": "gs://x/gone.png"}, RunBudget(run_id="r-1"))
+
+    assert len(result.workers) == 1
+
+
+async def test_a_tool_audit_is_attributed_to_the_run(harness, monkeypatch):
+    """The trust boundary blocks an injected document from inside read_artifact,
+    which has no run_id in its signature — tools take what the model needs to
+    decide, not our bookkeeping. Without an ambient run the block never appeared
+    in that run's trace: the one event the design exists to produce was invisible
+    on the screen built to show it.
+    """
+    from vigil import state
+
+    seen: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        state,
+        "db",
+        lambda: (_ for _ in ()).throw(RuntimeError("no datastore in this test")),
+    )
+    monkeypatch.setattr(state._log, "info", lambda *a, **k: seen.append(k))
+    monkeypatch.setattr(state._log, "error", lambda *a, **k: None)
+
+    async def audits_from_a_tool(name, prompt, budget, **kw):
+        # Stands in for read_artifact: deep in the stack, no run_id to hand over.
+        state.audit("guardrail.blocked", actor="trust-boundary", decision="blocked")
+        return AgentRun(agent=name, run_id=budget.run_id, output=harness["outputs"].get(name))
+
+    monkeypatch.setattr(pipe, "run_agent", audits_from_a_tool)
+    harness["outputs"]["orchestrator"] = plan("intake-agent")
+
+    await orchestrate(EVENT, RunBudget(run_id="r-ambient"))
+
+    blocks = [e for e in seen if e.get("action") == "guardrail.blocked"]
+    assert blocks, "the tool's audit entry was never written"
+    assert blocks[0]["run_id"] == "r-ambient"
+
+
+def test_an_explicit_run_id_beats_the_ambient_one():
+    """The context is a fallback, never an override — an entry that names its run
+    means it."""
+    from vigil import state
+
+    token = state.set_current_run("r-ambient")
+    try:
+        seen: list[dict[str, Any]] = []
+        original = state._log.info
+        state._log.info = lambda *a, **k: seen.append(k)
+        try:
+            state.db.cache_clear()
+            state.audit("x", actor="a", decision="done", run_id="r-explicit")
+        finally:
+            state._log.info = original
+    finally:
+        state.reset_current_run(token)
+
+    assert seen[0]["run_id"] == "r-explicit"

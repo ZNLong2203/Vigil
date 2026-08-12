@@ -76,6 +76,7 @@ async def run_agent(
     prompt: str,
     budget: RunBudget,
     *,
+    attachments: list[tuple[bytes, str]] | None = None,
     user_id: str = "vigil-system",
 ) -> AgentRun:
     """Run one agent to completion and return what it produced and what it did.
@@ -83,6 +84,12 @@ async def run_agent(
     Raises nothing on a budget breach: the run comes back with `stopped_by` set
     and whatever partial output exists. A ceiling is a normal outcome, not an
     exception — the caller decides whether a truncated plan is still usable.
+
+    Args:
+        attachments: (bytes, mime_type) pairs sent with the prompt. Photos and
+            voice notes travel this way because a tool result is JSON and cannot
+            carry bytes — and because the model needs the artifact itself, not a
+            transcription of it, to judge how much to trust what it read.
     """
     agent = build_agent(name, budget)
     result = AgentRun(agent=name, run_id=budget.run_id)
@@ -93,7 +100,10 @@ async def run_agent(
         app_name=APP_NAME, user_id=user_id, session_id=session_id
     )
 
-    message = types.Content(role="user", parts=[types.Part.from_text(text=prompt)])
+    parts = [types.Part.from_text(text=prompt)]
+    for data, mime_type in attachments or []:
+        parts.append(types.Part.from_bytes(data=data, mime_type=mime_type))
+    message = types.Content(role="user", parts=parts)
     pending: dict[str, ToolCall] = {}
     started = time.monotonic()
 

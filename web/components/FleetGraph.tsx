@@ -91,38 +91,55 @@ export function FleetGraph({
         />
       ))}
 
-      {/* ── The refused call. Dashed, and it crosses a boundary. ──────── */}
+      {/* ── The refused call. ────────────────────────────────────────────
+          
+          The line stops at the barrier rather than passing through it. An
+          earlier version drew straight from one box to the other with a label
+          floating in the gap: the label collided with the box it was pointing
+          past, and a line that reaches its destination is a poor way to show a
+          call that never arrived. Now it travels partway and halts, which is
+          what happened. The written explanation lives in the callout above the
+          figure, where there is room for it. */}
       {denied.map((d) => {
         const from = byName.get(d.from);
         const target = registry.find((r) => r.owner === d.to_department);
         if (!from || !target) return null;
-        const x1 = from.pos.x - NODE_W / 2;
-        const x2 = target.pos.x + NODE_W / 2;
-        const mid = (x1 + x2) / 2;
+        const start = from.pos.x - NODE_W / 2 - 4;
+        const end = target.pos.x + NODE_W / 2 + 4;
+        const barrier = (start + end) / 2;
         return (
           <g key={`denied-${d.from}`}>
+            <title>{`${d.from} attempted to read ${d.resource} — refused by Agent Identity`}</title>
             <line
-              x1={x1}
+              x1={start}
               y1={from.pos.y}
-              x2={x2}
-              y2={target.pos.y}
+              x2={barrier + 12}
+              y2={from.pos.y}
               stroke="var(--rose)"
-              strokeWidth={1.5}
+              strokeWidth={1.75}
               strokeDasharray="5 4"
             />
-            <circle cx={mid} cy={from.pos.y} r={11} fill="var(--bg-0)" stroke="var(--rose)" />
+            {/* The boundary it did not cross. */}
+            <line
+              x1={barrier}
+              y1={from.pos.y - 26}
+              x2={barrier}
+              y2={from.pos.y + 26}
+              stroke="var(--rose)"
+              strokeWidth={1}
+              strokeDasharray="2 3"
+              opacity={0.55}
+            />
+            <circle cx={barrier} cy={from.pos.y} r={12} fill="#0d1219" stroke="var(--rose)" strokeWidth={1.75} />
             <text
-              x={mid}
-              y={from.pos.y + 4}
+              x={barrier}
+              y={from.pos.y + 4.5}
               textAnchor="middle"
-              fontSize="12"
+              fontSize="13"
               fill="var(--rose)"
               aria-hidden
             >
               ⊘
-            </text>
-            <text x={mid} y={from.pos.y - 20} textAnchor="middle" fontSize="10" fill="var(--rose)">
-              denied by Agent Identity
             </text>
           </g>
         );

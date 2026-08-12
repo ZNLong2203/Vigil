@@ -56,6 +56,13 @@ keys. It holds no business tools of its own.
 
 ## 4. Architecture
 
+![How an untrusted artifact becomes a gated action, and the four places it can be stopped](docs/architecture.svg)
+
+The diagram above is the claim in one picture: an artifact arrives untrusted, and
+between arriving and changing anything in the world it passes four places where
+it can be stopped — and every stop is recorded. The flowchart below shows the
+same system by component.
+
 ```mermaid
 flowchart TB
     subgraph ingest["Ingestion — untrusted by default"]
@@ -115,8 +122,10 @@ flowchart TB
 | Checkpoint **before** side effect, complete **after** | duplicate work after a crash | [`state.py`](src/vigil/state.py) |
 | Idempotency claim as an atomic Firestore create | the resumed run that files the same claim twice | [`state.py`](src/vigil/state.py) |
 | Dead-letter topic after 5 delivery attempts | infinite retry loops burning credits | [`bus.py`](src/vigil/bus.py) |
-| Step / tool-call / token budgets | a runaway agent loop | [`config.py`](src/vigil/config.py) |
-| Read-only watchdog agent | hallucinated facts reaching a side effect | *in progress* |
+| Step / tool-call / token budgets | runaway breadth | [`budget.py`](src/vigil/fleet/budget.py) |
+| Repeat detector on identical tool calls | a stuck loop, minutes before the budget notices | [`toolbelt.py`](src/vigil/fleet/toolbelt.py) |
+| Eval gate + anti-gaming judge | a self-improvement that scored higher by memorising the tests | [`evolution.py`](src/vigil/fleet/evolution.py) |
+| Read-only watchdog agent | hallucinated facts reaching a side effect | [`pipeline.py`](src/vigil/fleet/pipeline.py) |
 | Append-only audit log | undetectable after-the-fact edits | [`state.py`](src/vigil/state.py) |
 
 ## 5. Mandatory stack compliance
@@ -126,7 +135,16 @@ flowchart TB
 | Gemini 3.5 or newer via Gemini API / Vertex AI | planning, multimodal extraction, conflict resolution | `VIGIL_MODEL_FAST` / `VIGIL_MODEL_DEEP` in [`config.py`](src/vigil/config.py) |
 | A Google agent framework | **Google ADK** (`google-adk`) for the orchestrator and workers | [`pyproject.toml`](pyproject.toml) |
 | A Google Cloud infrastructure service | **Cloud Run**, **Pub/Sub**, **Firestore**, **Cloud Storage**, Secret Manager, Cloud Trace | [`deploy.sh`](deploy.sh) |
-| Additional Google AI models *(bonus)* | Gemma for redaction; Veo and Lyria for the weekly digest | *in progress* |
+| Additional Google AI models | **Gemma** redacts names, addresses and dates of birth before anything reaches the reasoning tier; **Veo** renders the weekly digest as a shareable clip; **Lyria** generates three urgency signatures so a notification can be told apart without looking | [`redaction.py`](src/vigil/redaction.py), [`digest.py`](src/vigil/digest.py) |
+
+None of the three are decoration. Gemma does the pass a regex cannot — a person's
+name is the identifier that matters most in a care record and the one no pattern
+finds. Lyria's cues answer the only question a notification has to answer when
+someone's hands are full: *do I need to stop what I am doing?* A badge cannot
+answer that; three distinguishable sounds can.
+
+They are served by the Gemini API rather than Vertex, so they carry a second
+credential — see [ADR 011](docs/adr/011-two-model-backends.md).
 
 ## 6. Spin-up instructions
 
@@ -181,7 +199,22 @@ Three independent layers stop a runaway agent from draining a budget:
 Push subscriptions rather than a polling worker mean nothing stays warm; the
 service sleeps at zero instances between events.
 
-## 8. Repository layout
+## 8. Data handling and its limits
+
+Health data, so the honest version matters more than the reassuring one.
+[`docs/compliance.md`](docs/compliance.md) covers what is collected, how
+identifiers are removed and where that removal stops working, where data lives,
+and what waits for a human. Three things worth knowing before reading it:
+
+- **All data is synthetic.** Nothing here depicts a real person or record.
+- **Model calls are served from Vertex's `global` location, not `us-central1`.**
+  Regional endpoints serve only up to Gemini 2.5 and the mandatory tier is 3.5 or
+  newer, so a request may be served from any region. For real health data that is
+  a decision for whoever owns it; it is stated rather than buried.
+- **Without the Gemma credential, names and addresses are not redacted.** The
+  system says so in the log rather than degrading quietly.
+
+## 9. Repository layout
 
 ```
 src/vigil/
@@ -195,7 +228,7 @@ scripts/         bootstrap, smoke test, chaos test, teardown
 docs/adr/        architecture decision records
 ```
 
-## 9. Findings and learnings
+## 10. Findings and learnings
 
 **A multi-agent fleet does not fit in a free tier, and the reason is structural.**
 The Gemini API free tier allows 20 requests per day per model. One
@@ -251,6 +284,33 @@ run that was still in progress, marking a live run finished. Exactly-once on the
 side effects is not the same as exactly-once on the *bookkeeping*: only the
 delivery that owns the run may close it.
 
+**Isolating an instruction means neutralising the parts of it that assume a
+runtime.** The golden set scored the `meds-agent` instruction at 0.08 and the
+number was meaningless. The instruction tells the agent to read the medication
+graph before proposing anything, so with no tools attached in the eval harness
+the model emitted a function call and no text — twelve cases failing for a reason
+that had nothing to do with the quality of the instruction. A short preamble
+stating that no tools exist and the data is in the question took the baseline to
+0.50–0.75, where the remaining failures were real ones.
+
+**A gamed proposal that raises the score is the only interesting test of an
+eval gate.** The obvious gaming — "when in doubt, escalate" — makes the agent
+decline everything and the score falls, so any gate catches it. The version that
+matters added no hedging at all: it hardcoded answers for the specific cases in
+the suite. The score rose from 0.67 to 0.92 and the refusal rate on answerable
+cases *improved*. Every number said promote. It was rejected because the judge
+is given the instruction diff as well as the scores, and the diff named
+`Metaform`, `Cardiolex`, `Ferrog?n` — memorisation, not capability. A gate that
+sees only the score has no way to tell those apart.
+
+**An empty environment variable is not an unset one.** `FIRESTORE_EMULATOR_HOST=`
+is the obvious way to bypass an emulator for a single command, and to the Google
+SDKs it is a hostname — every call then fails with `the target uri is not valid:
+dns:///`. Silently, in our case: the version record from a three-minute
+evaluation was never persisted, and only the best-effort logging showed it.
+`config.py` now deletes empty `*_EMULATOR_HOST` variables so the obvious thing
+works.
+
 **Tests earn their place on integration seams, not on logic.** Three real
 defects came from tests written against behaviour rather than implementation: an
 email regex that swallowed the trailing full stop and so corrupted the
@@ -259,7 +319,7 @@ parameter and would have raised on every gated action; and an emulator guard
 that checked an environment variable instead of a socket, so the suite hung for
 199 seconds against a stopped container instead of skipping in one.
 
-## 10. Pre-existing work disclosure
+## 11. Pre-existing work disclosure
 
 All code in this repository was written during the submission period
 (Aug 3–31, 2026). No pre-existing work was incorporated. AI coding assistants

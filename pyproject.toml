@@ -25,6 +25,7 @@ dependencies = [
     "httpx",
     "python-dotenv>=1.2.2",
     "pypdf>=6.15.0",
+    "python-multipart>=0.0.32",
 ]
 
 [dependency-groups]

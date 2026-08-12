@@ -16,24 +16,29 @@
    ───────────────────────────────────────────────────────────────────────────── */
 
 :root {
-  /* Ground. Never pure black — it flattens the layer hierarchy and glares. */
-  --bg-0: #090b0e;
-  --bg-1: #10141a;
-  --bg-2: #171d26;
-  --bg-3: #1f2733;
-  --line: #262f3c;
-  --line-soft: #1b222c;
+  /* Ground. Never pure black — it flattens the layer hierarchy and glares.
+     
+     Warm rather than blue-grey. The first version was a cold console, and cold
+     is the wrong register for a product about looking after someone: it read as
+     surveillance rather than care. Same restraint, same density discipline,
+     shifted a few degrees toward lamplight. */
+  --bg-0: #0f0e0d;
+  --bg-1: #171614;
+  --bg-2: #211e1b;
+  --bg-3: #2b2724;
+  --line: #363129;
+  --line-soft: #241f1b;
 
-  --text-0: #e7ecf3;
-  --text-1: #97a3b4;
-  --text-2: #606c7d;
+  --text-0: #f3eee7;
+  --text-1: #a99f92;
+  --text-2: #736a60;
 
   /* One accent per meaning. A colour that means two things means nothing. */
-  --phosphor: #5ee6a8; /* agent acted, verified, healthy   */
-  --amber: #f0b24b; /* waiting on a human               */
-  --rose: #ff6b6b; /* denied, blocked, failed          */
-  --azure: #6ba8ff; /* trace, reasoning, informational  */
-  --violet: #b48bff; /* memory, provenance               */
+  --phosphor: #6ddc9f; /* agent acted, verified, healthy   */
+  --amber: #f2b155; /* waiting on a human               */
+  --rose: #f4736b; /* denied, blocked, failed          */
+  --azure: #7fa8ea; /* trace, reasoning, informational  */
+  --violet: #b795e8; /* memory, provenance               */
 
   --font-ui: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
   --font-mono: var(--font-geist-mono), ui-monospace, "SF Mono", monospace;
@@ -43,13 +48,15 @@
 }
 
 /* Density scales. Applied per region with data-density, never globally. */
+/* Calm got calmer. A caregiver reading this is tired and often standing up;
+   the first pass was sized for a desk. */
 [data-density="calm"] {
-  --pad: 1.25rem;
-  --gap: 1rem;
-  --row-h: 3.25rem;
-  --fs-body: 0.95rem;
-  --fs-meta: 0.8rem;
-  --fs-micro: 0.72rem;
+  --pad: 1.5rem;
+  --gap: 1.25rem;
+  --row-h: 3.75rem;
+  --fs-body: 1.02rem;
+  --fs-meta: 0.85rem;
+  --fs-micro: 0.74rem;
 }
 
 [data-density="dense"] {
@@ -68,7 +75,7 @@ html {
 
 body {
   background:
-    radial-gradient(120rem 60rem at 50% -20rem, #121924 0%, transparent 60%),
+    radial-gradient(120rem 60rem at 50% -20rem, #1c1814 0%, transparent 60%),
     var(--bg-0);
   color: var(--text-0);
   font-family: var(--font-ui);
@@ -220,4 +227,42 @@ body {
      This is what keeps a dense surface legible instead of shouting. */
   .row .detail { color: var(--text-2); transition: color 120ms ease; }
   .row:hover .detail { color: var(--text-1); }
+}
+
+@layer components {
+  /* Points at the single most interesting thing on a screen.
+     
+     Used sparingly and never more than once per view. The moments that earn one
+     are the ones a cold reader would otherwise scroll straight past: a refused
+     boundary crossing, a self-improvement that scored higher and was rejected
+     anyway. Without it those look like ordinary rows. */
+  .callout {
+    display: flex;
+    gap: 0.6rem;
+    align-items: flex-start;
+    padding: 0.7rem 0.85rem;
+    border-radius: var(--radius-sm);
+    border-left: 3px solid var(--callout-accent, var(--amber));
+    background: color-mix(in oklab, var(--callout-accent, var(--amber)) 8%, transparent);
+    font-size: 0.88rem;
+    line-height: 1.5;
+    color: var(--text-1);
+  }
+  .callout strong { color: var(--text-0); font-weight: 600; }
+  .callout-deny   { --callout-accent: var(--rose); }
+  .callout-info   { --callout-accent: var(--azure); }
+  .callout-ok     { --callout-accent: var(--phosphor); }
+
+  /* The orientation line every screen carries. */
+  .screen-intro {
+    max-width: 46rem;
+    font-size: 0.95rem;
+    line-height: 1.6;
+    color: var(--text-1);
+  }
+  .screen-intro em {
+    color: var(--text-0);
+    font-style: normal;
+    font-weight: 600;
+  }
 }

@@ -10,9 +10,23 @@ import type { Source } from "@/lib/api";
  */
 export function SourceBadge({ source, error }: { source: Source; error?: string }) {
   if (source === "live") {
+    // Static. "live" means this was read from the deployed API, not that
+    // something is happening right now — and a badge that pulses on every
+    // screen at all times is decoration wearing the clothes of a signal. The
+    // one animated element in this interface is the fleet indicator in the
+    // header, and it moves only when an agent is actually working.
     return (
       <span className="chip chip-ok" title="Read from the deployed API">
-        <span className="live-dot" style={{ width: "0.4rem", height: "0.4rem" }} aria-hidden />
+        <span
+          aria-hidden
+          style={{
+            width: "0.4rem",
+            height: "0.4rem",
+            borderRadius: "999px",
+            background: "currentColor",
+            display: "inline-block",
+          }}
+        />
         live
       </span>
     );

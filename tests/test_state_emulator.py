@@ -15,9 +15,8 @@ import uuid
 import pytest
 from tests.conftest import FIRESTORE_UP
 
-# Reachability, not configuration. .env sets FIRESTORE_EMULATOR_HOST on every
-# machine, so checking the variable alone makes these tests hang against a dead
-# emulator instead of skipping.
+# A real read, not a proxy for one. See conftest.firestore_usable — three
+# cheaper checks each looked sufficient and each was wrong.
 pytestmark = pytest.mark.skipif(
     not FIRESTORE_UP,
     reason="Firestore emulator is not listening — run `make up` first",

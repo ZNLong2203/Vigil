@@ -277,11 +277,8 @@ export const TRACE: Trace = {
   ],
 };
 
-/** Fleet status for the shell's status bar. */
-export const FLEET = [
-  { name: "orchestrator", department: "family", state: "idle" },
-  { name: "intake-agent", department: "family", state: "working" },
-  { name: "meds-agent", department: "clinical", state: "idle" },
-  { name: "benefits-agent", department: "benefits", state: "waiting" },
-  { name: "watchdog", department: "audit", state: "idle" },
-] as const;
+// FLEET lived here: five agents with a hand-written `state` field that the
+// status bar rendered as fact. Removed rather than left unused — a fixture that
+// asserts live activity is the one kind this file must not carry, and dead code
+// that looks authoritative gets picked back up. The bar now names the agents
+// from the registry and reads run state from the API.

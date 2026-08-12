@@ -95,3 +95,40 @@ export const getHealth = () =>
     model_fast: string;
     model_deep: string;
   }>("/health");
+
+export interface Uploaded {
+  source_uri: string;
+  content_type: string;
+  bytes: number;
+}
+
+/** Store a file and get back the URI to submit as an event. */
+export async function uploadArtifact(file: File): Promise<Uploaded> {
+  if (!BASE) throw new Error("no API configured");
+
+  const form = new FormData();
+  form.append("file", file);
+
+  // No Content-Type header: the browser has to set the multipart boundary, and
+  // overriding it produces a request the server cannot parse.
+  const response = await fetch(`${BASE}/artifacts`, {
+    method: "POST",
+    headers: { "X-API-Key": KEY },
+    body: form,
+  });
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(`${response.status} ${detail.slice(0, 200)}`);
+  }
+  return (await response.json()) as Uploaded;
+}
+
+/** Record a human's decision on a gated action. Does not execute it — the run
+ *  picks the settled approval up on its next tick. */
+export async function decideApproval(approvalId: string, approved: boolean): Promise<void> {
+  await call(`/approvals/${approvalId}`, {
+    method: "POST",
+    body: JSON.stringify({ approved, decided_by: "caregiver" }),
+  });
+}

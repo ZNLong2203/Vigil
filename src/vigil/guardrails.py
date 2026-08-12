@@ -113,7 +113,11 @@ _REDACTION_PATTERNS: list[tuple[str, str]] = [
     # wrong value in the token map, and the token map is what de-tokenises.
     ("EMAIL", r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+"),
     ("PHONE", r"(?<!\d)(?:\+\d{1,3}[\s-]?)?(?:\d[\s-]?){9,13}\d(?!\d)"),
-    ("POLICY", r"\b[A-Z]{2,4}-[A-Z0-9]{3,8}-[A-Z0-9]{1,4}\b"),
+    # Consume every hyphenated segment, not a fixed three. The original stopped
+    # after three and left the fourth behind: "NM-SYNTH-4471-B" redacted to
+    # "[POLICY_1]-B", which looks redacted and is not. Requiring at least two
+    # segments keeps ordinary hyphenated text like "CC-12" out.
+    ("POLICY", r"\b[A-Z]{2,4}(?:-[A-Z0-9]{1,8}){2,}\b"),
     ("ACCESSION", r"\b(?:SYNTH|ACC|REF)-[A-Z0-9-]{4,}\b"),
 ]
 
@@ -132,19 +136,53 @@ def redact(text: str) -> tuple[str, int, dict[str, str]]:
     address everywhere it appears and the model can still reason about identity
     without holding the value.
     """
-    token_map: dict[str, str] = {}
-    counters: dict[str, int] = {}
-    result = text
-
+    # Collect every match first, then resolve overlaps, then replace once.
+    #
+    # Replacing pattern-by-pattern looked fine and was not. "NM-SYNTH-4471-B"
+    # matches POLICY as "NM-SYNTH-4471" and ACCESSION as "SYNTH-4471-B"; applying
+    # both left "[POLICY_1]-B" — a partial redaction that leaks the suffix while
+    # looking redacted, and a token map with an entry that no longer appears in
+    # the text, so de-tokenisation would fail on it too.
+    #
+    # Longest match wins, ties broken by position. An identifier is one thing.
+    spans: list[tuple[int, int, str, str]] = []
     for label, pattern in _REDACTION_COMPILED:
         for match in pattern.finditer(text):
-            value = match.group(0)
-            if value in token_map.values():
-                continue
+            spans.append((match.start(), match.end(), label, match.group(0)))
+
+    spans.sort(key=lambda s: (s[0], -(s[1] - s[0])))
+
+    chosen: list[tuple[int, int, str, str]] = []
+    last_end = -1
+    for start, end, label, value in spans:
+        if start >= last_end:
+            chosen.append((start, end, label, value))
+            last_end = end
+
+    token_map: dict[str, str] = {}
+    counters: dict[str, int] = {}
+    value_to_token: dict[str, str] = {}
+    pieces: list[str] = []
+    cursor = 0
+
+    for start, end, label, value in chosen:
+        if value not in value_to_token:
             counters[label] = counters.get(label, 0) + 1
             token = f"[{label}_{counters[label]}]"
+            value_to_token[value] = token
             token_map[token] = value
-            result = result.replace(value, token)
+        pieces.append(text[cursor:start])
+        pieces.append(value_to_token[value])
+        cursor = end
+
+    pieces.append(text[cursor:])
+    result = "".join(pieces)
+
+    # A repeated identifier further along the text is the same identifier: the
+    # span pass only catches the occurrences the patterns found, so sweep the
+    # rest by value to keep tokens stable across the whole document.
+    for value, token in value_to_token.items():
+        result = result.replace(value, token)
 
     return result, len(token_map), token_map
 
@@ -155,8 +193,23 @@ def screen(text: str, *, source_uri: str | None = None) -> ScreenResult:
     A finding is terminal: the caller must not pass the text to a model. Callers
     get the redacted text back either way so the *finding itself* can be shown to
     a human without leaking identifiers.
+
+    Redaction goes through the Gemma tier when one is configured — regex finds
+    structured identifiers and cannot find a person's name, which is the one that
+    matters most in a care record. Imported here rather than at module scope
+    because redaction builds on this module's regex pass.
     """
-    redacted, redaction_count, _ = redact(text)
+    from vigil.redaction import redact as tiered_redact
+
+    result = tiered_redact(text)
+    redacted, redaction_count = result.text, result.count
+    if not result.used_model:
+        _log.warning(
+            "guardrail.regex_only",
+            source_uri=source_uri,
+            note=result.note,
+            detail="names and addresses are NOT redacted on this path",
+        )
 
     findings = [
         Finding(kind=kind, excerpt=_excerpt(redacted, match), pattern=pattern.pattern)

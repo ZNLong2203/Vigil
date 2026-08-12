@@ -121,3 +121,25 @@ def test_clinical_values_survive_redaction():
     redacted, _, _ = redact(text)
     assert "13.4 g/dL" in redacted
     assert "5 mg" in redacted
+
+
+def test_overlapping_patterns_do_not_leave_a_partial_redaction():
+    """'NM-SYNTH-4471-B' matches POLICY as 'NM-SYNTH-4471' and ACCESSION as
+    'SYNTH-4471-B'. Applying both left '[POLICY_1]-B' — redacted-looking text
+    that still leaks the suffix, and a token map entry pointing at a string no
+    longer present, so de-tokenisation would fail on it too."""
+    redacted, count, mapping = redact("Contact carer@example.test, ref NM-SYNTH-4471-B.")
+
+    assert count == 2, f"one identifier, one token — got {mapping}"
+    assert "NM-SYNTH-4471-B" not in redacted
+    assert "-B." not in redacted, "no fragment of the identifier may survive"
+    for value in mapping.values():
+        assert value not in redacted
+
+
+def test_a_repeated_identifier_keeps_one_token_throughout():
+    text = "Ref NM-SYNTH-4471-B. Quote NM-SYNTH-4471-B when calling."
+    redacted, count, _ = redact(text)
+
+    assert count == 1
+    assert redacted.count("[POLICY_1]") == 2

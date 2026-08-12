@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
-.PHONY: help install up down logs seed api worker web web-build dev smoke chaos fmt test clean
+.PHONY: help install up down logs seed api worker web web-build dev smoke chaos fixtures models twist digest fmt test clean
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -28,6 +28,17 @@ logs: ## Tail emulator logs
 
 seed: ## Create topics, subscription and bucket inside the emulators
 	uv run python scripts/bootstrap_local.py
+
+fixtures: ## Regenerate the synthetic corpus (PDFs, photos, voice notes)
+	uv run python scripts/generate_synthetic_data.py
+	uv run python scripts/generate_synthetic_images.py
+	uv run python scripts/generate_synthetic_audio.py
+
+digest: ## Render the weekly digest (Gemini text, Veo video, Lyria cues)
+	FIRESTORE_EMULATOR_HOST= uv run python -m vigil.digest_demo
+
+twist: ## Put a deliberately gamed instruction through the eval gate
+	FIRESTORE_EMULATOR_HOST= uv run python -m vigil.fleet.twist_demo
 
 models: ## Check credentials and list the model ids this account can use
 	uv run python scripts/check_models.py

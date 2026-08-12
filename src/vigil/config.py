@@ -26,6 +26,17 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # override=False so a variable set by Cloud Run wins over a stale local file.
 load_dotenv(override=False)
 
+# An empty *_EMULATOR_HOST is not "use the default" to the Google SDKs — it is a
+# host, and they try to connect to it, failing with "the target uri is not
+# valid: dns:///". That makes the obvious way to bypass an emulator for one
+# command (`FIRESTORE_EMULATOR_HOST= …`) silently break every call instead.
+#
+# Deleting the empty variables makes the obvious thing work. It also means
+# load_dotenv cannot reintroduce them, since it has already run.
+for _var in ("FIRESTORE_EMULATOR_HOST", "PUBSUB_EMULATOR_HOST", "STORAGE_EMULATOR_HOST"):
+    if os.environ.get(_var, "").strip() == "":
+        os.environ.pop(_var, None)
+
 
 class Settings(BaseSettings):
     # protected_namespaces=() because several fields are legitimately named
@@ -62,6 +73,17 @@ class Settings(BaseSettings):
     model_fast: str = Field(default="gemini-3.5-flash", validation_alias="VIGIL_MODEL_FAST")
     model_deep: str = Field(default="gemini-3.6-flash", validation_alias="VIGIL_MODEL_DEEP")
     api_key: str = Field(default="", validation_alias="GOOGLE_API_KEY")
+
+    # Gemma is served by the Gemini API, not by Vertex — `make models` shows it
+    # on an AI Studio key and absent from the Vertex catalogue for this project.
+    # So redaction has its own credential and its own client, which is a fair
+    # reflection of what it is: a different model, on a different tier, doing the
+    # one job that must happen before anything reaches the reasoning tier.
+    #
+    # Optional. Without it the regex fallback in guardrails.py runs instead, and
+    # says so in the log rather than pretending to be the model path.
+    gemma_model: str = Field(default="gemma-4-31b-it", validation_alias="VIGIL_MODEL_GEMMA")
+    gemma_api_key: str = Field(default="", validation_alias="VIGIL_GEMMA_API_KEY")
 
     # Layer 1 of the runaway-agent defence: exceeding any of these aborts the run
     # and writes an audit entry rather than silently continuing. Layer 2 is Cloud

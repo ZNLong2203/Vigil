@@ -19,6 +19,7 @@ Firestore collections
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import uuid
@@ -147,6 +148,31 @@ def finish_run(run_id: str, status: str = "done") -> None:
 #: How long an audit write may block the caller. Short on purpose — see audit().
 AUDIT_TIMEOUT_S = 5.0
 
+#: The run a call is happening inside, carried ambiently.
+#:
+#: Tools are called by the model, not by us, so a tool signature contains what
+#: the model needs to decide — a source_uri — and not the bookkeeping. That left
+#: the most important audit entry in the system untagged: the trust boundary
+#: blocks an injected document from inside `read_artifact`, which has no run_id
+#: to record, so the block never appeared in that run's trace. The one event the
+#: whole design exists to produce was invisible on the screen built to show it.
+#:
+#: A context variable fixes it without putting plumbing in the model's way, and
+#: without a global: each task gets its own value, so concurrent runs cannot
+#: attribute each other's entries.
+_current_run: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "vigil_current_run", default=None
+)
+
+
+def set_current_run(run_id: str | None) -> contextvars.Token:
+    """Bind the run for everything called from here down. Reset with the token."""
+    return _current_run.set(run_id)
+
+
+def reset_current_run(token: contextvars.Token) -> None:
+    _current_run.reset(token)
+
 
 def audit(action: str, actor: str, decision: str, **details: Any) -> str:
     """Append-only. Audit entries are written, never updated or deleted — that is
@@ -166,6 +192,12 @@ def audit(action: str, actor: str, decision: str, **details: Any) -> str:
     failure itself is recorded too. Degrade, do not disappear, and never block.
     """
     entry_id = uuid.uuid4().hex
+
+    # Fill in the run from the ambient context when the caller did not pass one.
+    # An explicit run_id always wins — the context is a fallback, not an override.
+    if "run_id" not in details and (ambient := _current_run.get()):
+        details = {**details, "run_id": ambient}
+
     record = {
         "action": action,
         "actor": actor,

@@ -44,6 +44,14 @@ MODEL_DEEP="${VIGIL_MODEL_DEEP:-gemini-3.6-flash}"
 # 600s is the maximum Pub/Sub allows, and still shorter than the Cloud Run
 # request timeout (900s), so the request is never cut off mid-run.
 ACK_DEADLINE="${VIGIL_ACK_DEADLINE:-600}"
+
+# Gemma redacts names before anything reaches the reasoning tier (ADR 005). It is
+# served by the Gemini API, not Vertex, so it carries its own credential — read
+# from .env if present. Optional: without it the trust boundary falls back to the
+# regex tier, which finds structured identifiers and cannot find a person's name.
+# The fallback logs a warning saying exactly that rather than degrading quietly.
+GEMMA_KEY="${VIGIL_GEMMA_API_KEY:-$(grep -sh '^VIGIL_GEMMA_API_KEY=' .env | cut -d= -f2- | tr -d '\r')}"
+GEMMA_MODEL="${VIGIL_MODEL_GEMMA:-gemma-4-31b-it}"
 SERVICE="${VIGIL_SERVICE:-vigil}"
 TOPIC_EVENTS="${VIGIL_TOPIC_EVENTS:-vigil.events.clean}"
 TOPIC_DLQ="${VIGIL_TOPIC_DLQ:-vigil.events.dead}"
@@ -64,7 +72,7 @@ PROJECT_NUMBER="$(gcloud projects describe "$PROJECT" --format='value(projectNum
 bold "Project $PROJECT ($PROJECT_NUMBER) · region $REGION"
 
 # ── 1. APIs ──────────────────────────────────────────────────────────────────
-bold "1/6  Enabling APIs"
+bold "1/7  Enabling APIs"
 gcloud services enable \
   run.googleapis.com \
   cloudbuild.googleapis.com \
@@ -79,7 +87,7 @@ gcloud services enable \
   --quiet
 
 # ── 2. Firestore ─────────────────────────────────────────────────────────────
-bold "2/6  Firestore (native mode)"
+bold "2/7  Firestore (native mode)"
 if gcloud firestore databases describe --database='(default)' >/dev/null 2>&1; then
   echo "    already exists"
 else
@@ -87,15 +95,34 @@ else
 fi
 
 # ── 3. Pub/Sub ───────────────────────────────────────────────────────────────
-bold "3/6  Pub/Sub topics"
+bold "3/7  Pub/Sub topics and the artifact bucket"
 for t in "$TOPIC_EVENTS" "$TOPIC_DLQ"; do
   gcloud pubsub topics describe "$t" >/dev/null 2>&1 \
     && echo "    topic $t already exists" \
     || gcloud pubsub topics create "$t" --quiet
 done
 
+# ── 3b. Raw artifact bucket ──────────────────────────────────────────────────
+#
+# Uniform bucket-level access, no public reads: uploads are photographs of
+# medication and paperwork. Synthetic here, but the access model has to be the
+# one the real thing would need, or the demo is teaching the wrong lesson.
+#
+# A 30-day lifecycle rule keeps the footprint near zero — the hackathon's own
+# cost guidance — and means nothing lingers after judging.
+BUCKET="${VIGIL_BUCKET_RAW:-${PROJECT}-vigil-raw}"
+if gcloud storage buckets describe "gs://${BUCKET}" >/dev/null 2>&1; then
+  echo "    bucket ${BUCKET} already exists"
+else
+  gcloud storage buckets create "gs://${BUCKET}" \
+    --location="$REGION" --uniform-bucket-level-access --quiet
+fi
+printf '{"rule":[{"action":{"type":"Delete"},"condition":{"age":30}}]}' >/tmp/vigil-lifecycle.json
+gcloud storage buckets update "gs://${BUCKET}" \
+  --lifecycle-file=/tmp/vigil-lifecycle.json --quiet >/dev/null
+
 # ── 4. Service accounts (one identity per role — least privilege) ────────────
-bold "4/6  Service accounts"
+bold "4/7  Service accounts"
 create_sa() {
   local name="$1" display="$2"
   gcloud iam service-accounts describe "${name}@${PROJECT}.iam.gserviceaccount.com" >/dev/null 2>&1 \
@@ -118,7 +145,7 @@ done
 echo "    roles bound to ${SA_RUN}"
 
 # ── 5. Cloud Run ─────────────────────────────────────────────────────────────
-bold "5/6  Deploying Cloud Run service '${SERVICE}'"
+bold "5/7  Deploying Cloud Run service '${SERVICE}'"
 API_KEY="${VIGIL_API_KEY:-}"
 [[ -n "$API_KEY" ]] || API_KEY="$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')"
 
@@ -153,13 +180,13 @@ gcloud run deploy "$SERVICE" \
   --cpu=1 --memory=512Mi \
   --concurrency=10 \
   --timeout=900 \
-  --set-env-vars="VIGIL_ENV=cloud,GOOGLE_CLOUD_PROJECT=${PROJECT},GOOGLE_CLOUD_REGION=${REGION},GOOGLE_CLOUD_LOCATION=${VERTEX_LOCATION},GOOGLE_GENAI_USE_VERTEXAI=true,VIGIL_MODEL_FAST=${MODEL_FAST},VIGIL_MODEL_DEEP=${MODEL_DEEP},VIGIL_API_KEY=${API_KEY},VIGIL_TOPIC_EVENTS=${TOPIC_EVENTS},VIGIL_TOPIC_DLQ=${TOPIC_DLQ},VIGIL_SUBSCRIPTION_WORKER=${SUBSCRIPTION}" \
+  --set-env-vars="VIGIL_ENV=cloud,GOOGLE_CLOUD_PROJECT=${PROJECT},GOOGLE_CLOUD_REGION=${REGION},GOOGLE_CLOUD_LOCATION=${VERTEX_LOCATION},GOOGLE_GENAI_USE_VERTEXAI=true,VIGIL_MODEL_FAST=${MODEL_FAST},VIGIL_MODEL_DEEP=${MODEL_DEEP},VIGIL_API_KEY=${API_KEY},VIGIL_TOPIC_EVENTS=${TOPIC_EVENTS},VIGIL_TOPIC_DLQ=${TOPIC_DLQ},VIGIL_SUBSCRIPTION_WORKER=${SUBSCRIPTION},VIGIL_BUCKET_RAW=${BUCKET},VIGIL_MODEL_GEMMA=${GEMMA_MODEL},VIGIL_GEMMA_API_KEY=${GEMMA_KEY}" \
   --quiet
 
 URL="$(gcloud run services describe "$SERVICE" --region="$REGION" --format='value(status.url)')"
 
 # ── 6. Push subscription (no polling worker => nothing stays warm) ───────────
-bold "6/6  Pub/Sub push subscription"
+bold "6/7  Pub/Sub push subscription"
 gcloud run services add-iam-policy-binding "$SERVICE" \
   --region="$REGION" --member="serviceAccount:${PUSH_SA}" \
   --role=roles/run.invoker --quiet >/dev/null
@@ -189,6 +216,42 @@ else
     --ack-deadline="$ACK_DEADLINE" --quiet
 fi
 
+# ── 7. Weekly digest schedule ────────────────────────────────────────────────
+#
+# The one genuinely periodic thing in the system. Everything else reacts to an
+# event; a weekly note is a weekly note, and one that has to be requested is one
+# nobody reads.
+#
+# Video is off on the scheduled run: it costs minutes and Cloud Scheduler's
+# deadline is measured in seconds. The text and the urgency cue — the parts a
+# caregiver acts on — are fast. Request the video explicitly when it is wanted.
+bold "7/7  Weekly digest schedule"
+SCHEDULE_JOB="${VIGIL_SCHEDULE_JOB:-vigil-weekly-digest}"
+SCHEDULE_CRON="${VIGIL_SCHEDULE_CRON:-0 8 * * 1}"
+
+if gcloud scheduler jobs describe "$SCHEDULE_JOB" --location="$REGION" >/dev/null 2>&1; then
+  # `update http` takes --update-headers; only `create` accepts --headers.
+  # Re-running the deploy failed on this, which is the one thing an idempotent
+  # script must not do.
+  gcloud scheduler jobs update http "$SCHEDULE_JOB" --location="$REGION" \
+    --schedule="$SCHEDULE_CRON" \
+    --uri="${URL}/digest" \
+    --http-method=POST \
+    --update-headers="Content-Type=application/json,X-API-Key=${API_KEY}" \
+    --message-body='{"subject":"care-subject-001","days":7,"with_video":false}' \
+    --attempt-deadline=180s --quiet
+else
+  gcloud scheduler jobs create http "$SCHEDULE_JOB" --location="$REGION" \
+    --schedule="$SCHEDULE_CRON" \
+    --time-zone="Etc/UTC" \
+    --uri="${URL}/digest" \
+    --http-method=POST \
+    --headers="Content-Type=application/json,X-API-Key=${API_KEY}" \
+    --message-body='{"subject":"care-subject-001","days":7,"with_video":false}' \
+    --attempt-deadline=180s --quiet
+fi
+echo "    ${SCHEDULE_JOB}: ${SCHEDULE_CRON} (Mondays 08:00 UTC)"
+
 bold "Deployed"
 cat <<EOF
   URL        ${URL}
@@ -204,6 +267,9 @@ cat <<EOF
     Logs        https://console.cloud.google.com/run/detail/${REGION}/${SERVICE}/logs?project=${PROJECT}
     Traces      https://console.cloud.google.com/traces/list?project=${PROJECT}
     Firestore   https://console.cloud.google.com/firestore/databases/-default-/data?project=${PROJECT}
+
+  Weekly digest  ${SCHEDULE_JOB} — runs Mondays 08:00 UTC
+  Test it now    gcloud scheduler jobs run ${SCHEDULE_JOB} --location=${REGION}
 
   When you are done filming:  ./scripts/teardown.sh
 EOF
