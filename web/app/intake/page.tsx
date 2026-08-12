@@ -3,10 +3,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { Dropzone, type Dropped } from "@/components/Dropzone";
 import { ScreenIntro } from "@/components/ScreenIntro";
-import { SourceBadge } from "@/components/SourceBadge";
-import { isConfigured, submitEvent, uploadArtifact, withFallback } from "@/lib/api";
-import { INTAKE_SAMPLES, SUBJECT } from "@/lib/mock";
-import type { IntakeArtifact } from "@/lib/types";
+import { read, submitEvent, uploadArtifact } from "@/lib/api";
+import { IntakeRun } from "@/components/IntakeHistory";
+import { useLive } from "@/lib/live";
+
+/** The person this deployment coordinates care for. One subject, because the
+ *  demo is about depth over weeks rather than breadth across accounts. */
+const SUBJECT = "care-subject-001";
 
 /**
  * Intake — the multimodal surface, and the only screen that writes.
@@ -136,58 +139,24 @@ function Progress({ item }: { item: Tracked }) {
   );
 }
 
-function Sample({ item }: { item: IntakeArtifact }) {
-  return (
-    <article className="panel overflow-hidden">
-      <div className="panel-head">
-        <span className="mono text-[0.85rem] truncate">{item.filename}</span>
-        <span className="eyebrow shrink-0">{kb(item.bytes)}</span>
-      </div>
-      <div className="grid md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-[var(--line-soft)]">
-        <div className="p-4">
-          <p className="eyebrow mb-2">As received</p>
-          <p className="text-[0.9rem] leading-relaxed text-[var(--text-1)]">{item.difficulty}</p>
-          {item.blocked && (
-            <div
-              className="mt-3 rounded-md border p-3"
-              style={{
-                borderColor: "color-mix(in oklab, var(--rose) 40%, transparent)",
-                background: "color-mix(in oklab, var(--rose) 8%, transparent)",
-              }}
-            >
-              <p className="chip chip-deny mb-2">
-                <span aria-hidden>⊘</span> blocked at the trust boundary
-              </p>
-              <p className="text-[0.85rem] text-[var(--text-1)]">{item.blocked.reason}</p>
-              <p className="mono text-[0.72rem] mt-2 text-[var(--text-2)] leading-relaxed">
-                &ldquo;{item.blocked.excerpt}&rdquo;
-              </p>
-            </div>
-          )}
-        </div>
-        <div className="p-4">
-          <p className="eyebrow mb-2">Extracted</p>
-          <dl className="space-y-1.5">
-            {Object.entries(item.extracted).map(([key, value]) => (
-              <div key={key} className="flex gap-3 text-[0.88rem]">
-                <dt className="mono text-[var(--text-2)] min-w-[10rem] shrink-0">{key}</dt>
-                <dd className="text-[var(--text-0)]">{String(value)}</dd>
-              </div>
-            ))}
-          </dl>
-          <div className="mt-3 pt-3 border-t border-[var(--line-soft)] flex items-center gap-2.5 flex-wrap">
-            <span className="chip chip-memory">{item.redactions} identifiers tokenised</span>
-            <span className="mono text-[0.72rem] text-[var(--text-2)]">{item.model}</span>
-          </div>
-        </div>
-      </div>
-    </article>
-  );
+interface RunRow {
+  run_id: string;
+  kind?: string;
+  status?: string;
+  metadata?: { source_uri?: string | null } | null;
 }
 
 export default function IntakePage() {
   const [tracked, setTracked] = useState<Tracked[]>([]);
-  const live = isConfigured();
+
+  // What the fleet has already read. This screen used to show nothing at all
+  // until you dropped a file in — the in-flight list lives in component state,
+  // so a reload emptied it and a first visit was a dropzone on an empty page.
+  // Everything below is work the deployed system actually did.
+  const runs = useLive<{ runs: RunRow[] }>("/runs?limit=25", 30_000);
+  const history = (runs.data?.runs ?? [])
+    .filter((r) => ["document", "photo", "voice_note"].includes(r.kind ?? ""))
+    .slice(0, 8);
 
   const update = useCallback((id: string, patch: Partial<Tracked>) => {
     setTracked((current) =>
@@ -234,14 +203,19 @@ export default function IntakePage() {
 
     const timer = setInterval(async () => {
       for (const item of inFlight) {
-        const { data, source } = await withFallback<{
-          entries: { action: string; actor: string; decision: string; at: string }[];
-        }>(`/audit?run_id=${item.runId}&limit=50`, { entries: [] });
-        if (source !== "live") continue;
+        try {
+          const data = await read<{
+            entries: { action: string; actor: string; decision: string; at: string }[];
+          }>(`/audit?run_id=${item.runId}&limit=50`);
 
-        const events = [...data.entries].sort((a, b) => a.at.localeCompare(b.at));
-        const finished = events.some((e) => e.action === "run.finished");
-        update(item.id, { events, stage: finished ? "done" : "running" });
+          const events = [...data.entries].sort((a, b) => a.at.localeCompare(b.at));
+          const finished = events.some((e) => e.action === "run.finished");
+          update(item.id, { events, stage: finished ? "done" : "running" });
+        } catch {
+          // One missed poll during a run is not worth reporting: the next tick
+          // is five seconds away and the run is unaffected either way. A failure
+          // that matters shows up as the run never reaching run.finished.
+        }
       }
     }, 5000);
 
@@ -251,22 +225,13 @@ export default function IntakePage() {
   return (
     <div data-density="calm" className="h-full overflow-y-auto">
       <div className="mx-auto max-w-4xl px-4 py-6">
-        <ScreenIntro title="Intake" aside={<SourceBadge source={live ? "live" : "fixture"} />}>
-          {live ? (
-            <>
-              Drop in a photo, a recording or a scan. Three agents read it, check each other,
-              and stop for you if they are not sure. <em>Watch the steps appear</em> — a full
-              run takes about a minute and a half, and you can see which agent has it.
-            </>
-          ) : (
-            <>
-              No backend is answering, so nothing can be uploaded. The examples below show
-              what the pipeline does with each kind of difficult input.
-            </>
-          )}
+        <ScreenIntro title="Intake">
+          Drop in a photo, a recording or a scan. Three agents read it, check each other, and
+          stop for you if they are not sure. <em>Watch the steps appear</em> — a full run takes
+          about a minute and a half, and you can see which agent has it.
         </ScreenIntro>
 
-        <Dropzone onFiles={handleFiles} disabled={!live} />
+        <Dropzone onFiles={handleFiles} />
 
         {tracked.length > 0 && (
           <>
@@ -282,22 +247,32 @@ export default function IntakePage() {
           </>
         )}
 
-        {/* Worked examples, labelled as such.
-            
-            These are hand-written illustrations of what the pipeline does with
-            each kind of difficult input — not captured output. Presenting
-            authored data under a heading like "recently processed" would be the
-            exact ambiguity the source badge exists to prevent, so the heading
-            says what they are and they sit below anything real. */}
-        <div className="flex items-center gap-3 mt-6 mb-3">
-          <span className="eyebrow">Worked examples — illustrations, not captured output</span>
-          <span className="h-px flex-1 bg-[var(--line-soft)]" />
-        </div>
-        <div className="space-y-4">
-          {INTAKE_SAMPLES.map((item) => (
-            <Sample key={item.id} item={item} />
-          ))}
-        </div>
+        {history.length > 0 && (
+          <>
+            <div className="flex items-center gap-3 mt-7 mb-3">
+              <span className="eyebrow">Already read</span>
+              <span className="h-px flex-1 bg-[var(--line-soft)]" />
+              <span className="eyebrow">what arrived · what was understood</span>
+            </div>
+            <div className="space-y-4">
+              {history.map((run) => (
+                <IntakeRun
+                  key={run.run_id}
+                  runId={run.run_id}
+                  sourceUri={run.metadata?.source_uri}
+                />
+              ))}
+            </div>
+          </>
+        )}
+
+        {history.length === 0 && runs.status === "ready" && tracked.length === 0 && (
+          <p className="mt-7 text-[0.9rem] leading-relaxed text-[var(--text-2)]">
+            Nothing has been through intake yet. Drop a photo, a recording or a scan above and
+            it appears here with the claims the agents extracted from it, and how sure they
+            were about each one.
+          </p>
+        )}
       </div>
     </div>
   );

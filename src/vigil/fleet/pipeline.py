@@ -245,10 +245,48 @@ async def _step(
         run_id,
         step_id,
         key,
-        {"tokens": run.tokens, "elapsed_s": run.elapsed_s, "tools": len(run.tool_calls)},
+        {
+            "tokens": run.tokens,
+            "elapsed_s": run.elapsed_s,
+            "tools": len(run.tool_calls),
+            # What the agent actually concluded, not only what it cost.
+            #
+            # The checkpoint stored the meter readings and threw the work away.
+            # Nothing downstream could answer "what did the agent understand from
+            # this photograph" — which is the entire argument of the Intake
+            # screen, the pairing of a messy input with the structured reading of
+            # it. That screen filled the gap with authored examples, so the
+            # missing half looked like a design choice rather than lost data.
+            "output": _serialisable(run.output),
+        },
     )
     budget.spend_step()
     return run
+
+
+#: Firestore rejects a document over 1 MiB, and a checkpoint is written on a
+#: path where failing is expensive — the agent has already done the work. Well
+#: under the limit rather than near it.
+_MAX_OUTPUT_CHARS = 20_000
+
+
+def _serialisable(output: Any) -> dict[str, Any] | None:
+    """The agent's structured output, as something Firestore will accept.
+
+    Returns None rather than raising: a checkpoint that fails to write turns a
+    completed hop into a repeated one, and no screen is worth paying for a step
+    twice.
+    """
+    if output is None:
+        return None
+    try:
+        data = output.model_dump(mode="json") if hasattr(output, "model_dump") else dict(output)
+        if len(json.dumps(data)) > _MAX_OUTPUT_CHARS:
+            return {"truncated": True, "summary": str(getattr(output, "summary", ""))[:500]}
+        return data
+    except Exception as exc:  # noqa: BLE001 — see docstring
+        _log.warning("checkpoint.output_unserialisable", error=str(exc)[:200])
+        return None
 
 
 def _attachments(event: dict[str, Any]) -> list[tuple[bytes, str]]:

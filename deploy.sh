@@ -161,17 +161,20 @@ API_KEY="${VIGIL_API_KEY:-}"
 #   - rotate it after filming, and run scripts/teardown.sh. The rules do not
 #     require the app to stay live for judging.
 #
-# Set VIGIL_PUBLIC_UI=0 to build the UI without a key: it then opens in fixture
-# mode, showing the same story from committed data with nothing live behind it.
-if [[ "${VIGIL_PUBLIC_UI:-1}" == "1" ]]; then
-  UI_BUILD_ARGS="NEXT_PUBLIC_VIGIL_API=,NEXT_PUBLIC_VIGIL_KEY=${API_KEY}"
-else
-  UI_BUILD_ARGS="NEXT_PUBLIC_VIGIL_API=,NEXT_PUBLIC_VIGIL_KEY="
-fi
+# Set VIGIL_PUBLIC_UI=0 and the page opens in fixture mode, showing the same
+# story from committed data with nothing live behind it.
+#
+# The key reaches the browser at runtime, from GET /ui-config, not baked into the
+# bundle at build time. It was baked in until it turned out that never worked:
+# `gcloud run deploy --source` gives --set-build-env-vars to the *builder*, and a
+# Dockerfile build does not see them as build args, so NEXT_PUBLIC_VIGIL_KEY was
+# empty in every image ever shipped. The page then took its own fallback path and
+# labelled itself "sample data", which is correct behaviour for a UI with no
+# backend and meant the failure never looked like one.
+PUBLIC_UI="${VIGIL_PUBLIC_UI:-1}"
 
 gcloud run deploy "$SERVICE" \
   --source=. \
-  --set-build-env-vars="$UI_BUILD_ARGS" \
   --region="$REGION" \
   --service-account="$RUN_SA" \
   --allow-unauthenticated \
@@ -180,7 +183,7 @@ gcloud run deploy "$SERVICE" \
   --cpu=1 --memory=512Mi \
   --concurrency=10 \
   --timeout=900 \
-  --set-env-vars="VIGIL_ENV=cloud,GOOGLE_CLOUD_PROJECT=${PROJECT},GOOGLE_CLOUD_REGION=${REGION},GOOGLE_CLOUD_LOCATION=${VERTEX_LOCATION},GOOGLE_GENAI_USE_VERTEXAI=true,VIGIL_MODEL_FAST=${MODEL_FAST},VIGIL_MODEL_DEEP=${MODEL_DEEP},VIGIL_API_KEY=${API_KEY},VIGIL_TOPIC_EVENTS=${TOPIC_EVENTS},VIGIL_TOPIC_DLQ=${TOPIC_DLQ},VIGIL_SUBSCRIPTION_WORKER=${SUBSCRIPTION},VIGIL_BUCKET_RAW=${BUCKET},VIGIL_MODEL_GEMMA=${GEMMA_MODEL},VIGIL_GEMMA_API_KEY=${GEMMA_KEY}" \
+  --set-env-vars="VIGIL_ENV=cloud,GOOGLE_CLOUD_PROJECT=${PROJECT},GOOGLE_CLOUD_REGION=${REGION},GOOGLE_CLOUD_LOCATION=${VERTEX_LOCATION},GOOGLE_GENAI_USE_VERTEXAI=true,VIGIL_MODEL_FAST=${MODEL_FAST},VIGIL_MODEL_DEEP=${MODEL_DEEP},VIGIL_API_KEY=${API_KEY},VIGIL_TOPIC_EVENTS=${TOPIC_EVENTS},VIGIL_TOPIC_DLQ=${TOPIC_DLQ},VIGIL_SUBSCRIPTION_WORKER=${SUBSCRIPTION},VIGIL_BUCKET_RAW=${BUCKET},VIGIL_MODEL_GEMMA=${GEMMA_MODEL},VIGIL_GEMMA_API_KEY=${GEMMA_KEY},VIGIL_PUBLIC_UI=${PUBLIC_UI}" \
   --quiet
 
 URL="$(gcloud run services describe "$SERVICE" --region="$REGION" --format='value(status.url)')"

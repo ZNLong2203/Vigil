@@ -1,7 +1,7 @@
 "use client";
 
-import { REGISTRY } from "@/lib/registry";
-import { useLoaded } from "@/lib/live";
+import { useRegistry } from "@/lib/registry";
+import { useLive } from "@/lib/live";
 
 /**
  * The fleet, always visible.
@@ -33,20 +33,23 @@ interface RunRow {
 }
 
 export function StatusBar() {
-  const runs = useLoaded<{ runs: RunRow[] }>("/runs?limit=20", { runs: [] }, 20_000);
-  const live = runs.source === "live";
-  const rows = live ? runs.data.runs : [];
+  const runs = useLive<{ runs: RunRow[] }>("/runs?limit=20", 20_000);
+  const registry = useRegistry();
+  const rows = runs.data?.runs ?? [];
 
   const running = rows.filter((r) => r.status === "running").length;
   const waiting = rows.filter((r) => r.status === "awaiting_human").length;
 
-  const state = !live
-    ? { chip: "chip chip-muted", text: "no API configured" }
-    : running
-      ? { chip: "chip chip-ok", text: `${running} run${running > 1 ? "s" : ""} in flight` }
-      : waiting
-        ? { chip: "chip chip-wait", text: `${waiting} waiting on a human` }
-        : { chip: "chip chip-muted", text: "fleet idle" };
+  const state =
+    runs.status === "error"
+      ? { chip: "chip chip-deny", text: "service unreachable" }
+      : runs.status === "loading"
+        ? { chip: "chip chip-muted", text: "…" }
+        : running
+          ? { chip: "chip chip-ok", text: `${running} run${running > 1 ? "s" : ""} in flight` }
+          : waiting
+            ? { chip: "chip chip-wait", text: `${waiting} waiting on a human` }
+            : { chip: "chip chip-muted", text: "fleet idle" };
 
   return (
     <footer
@@ -54,7 +57,7 @@ export function StatusBar() {
       className="shrink-0 border-t border-[var(--line-soft)] px-4 py-1.5 flex items-center gap-3 flex-wrap"
     >
       <span className="eyebrow">Fleet</span>
-      {REGISTRY.map((agent) => (
+      {registry.entries.map((agent) => (
         <span
           key={agent.name}
           className={`chip chip-muted dept-${agent.owner}`}

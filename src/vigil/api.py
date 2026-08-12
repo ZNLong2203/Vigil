@@ -92,11 +92,46 @@ def health() -> dict[str, Any]:
     }
 
 
+@app.get("/ui-config")
+def ui_config() -> dict[str, Any]:
+    """The credential the bundled UI uses, handed over at runtime.
+
+    The alternative was baking it into the JavaScript at image build time, which
+    is where it was and which silently did not work: `gcloud run deploy --source`
+    hands build env vars to the builder, not to Docker as build args, so the
+    bundle shipped with an empty key. Nothing failed loudly. Every screen fell
+    back to its fixtures and labelled itself "sample data" — exactly what it is
+    designed to do when no backend answers — so the UI had never once been live
+    in a browser and looked entirely healthy the whole time.
+
+    Yes, this publishes the key, and that was already true by design: the service
+    is --allow-unauthenticated, deploy.sh prints the key in plaintext, and a demo
+    where a visitor drops in a photo and watches agents read it must carry a
+    credential the visitor's browser can read. There is no arrangement in which a
+    browser keeps a secret from the person using it. The key still does what its
+    docstring claims — stops stray internet traffic from burning credits — and
+    the real ceiling was never secrecy: --max-instances=3, the per-run token
+    budget, and billing alerts.
+
+    Unauthenticated on purpose. Requiring the key in order to fetch the key is a
+    loop with no way in.
+    """
+    settings = get_settings()
+    return {"api_key": settings.api_auth_key if settings.public_ui else None}
+
+
 @app.post("/events", response_model=EventOut, dependencies=[Depends(require_api_key)])
 def ingest(event: EventIn) -> EventOut:
     s = get_settings()
     with span("api.ingest", event_kind=event.kind, subject=event.subject):
-        run = start_run(kind=event.kind, subject=event.subject, metadata={"source": "api"})
+        # source_uri travels on the run, not only in the queued message. Without
+        # it a finished run cannot say which artifact it was about, so nothing
+        # can pair the thing that arrived with the reading the agents made of it.
+        run = start_run(
+            kind=event.kind,
+            subject=event.subject,
+            metadata={"source": "api", "source_uri": event.source_uri, "body": event.body},
+        )
         message_id = publish(
             s.topic_events,
             {"run_id": run.run_id, **event.model_dump()},
@@ -322,8 +357,19 @@ def get_registry() -> dict[str, Any]:
     while what happened when it tried to improve itself is a runtime record. A
     registry that let an agent widen its own scope at runtime would not be a
     boundary at all.
+
+    Also returns, per agent, the tool names `build_belt` actually assembles for
+    it, and who owns every scope in the system. Together those let a reader work
+    out what an agent *cannot* reach — which is the claim the fleet screen makes,
+    and which it previously illustrated with a hand-written denial event. That
+    illustration was misleading in a specific way: a runtime denial is layer two,
+    and layer two almost never fires, because layer one never hands the agent the
+    tool in the first place. The boundary is real; the event was not the way to
+    show it.
     """
     from vigil.fleet.registry import FLEET
+    from vigil.fleet.scopes import SCOPE_OWNER
+    from vigil.fleet.toolbelt import build_belt
 
     agents = []
     for entry in FLEET:
@@ -358,10 +404,18 @@ def get_registry() -> dict[str, Any]:
                     "anti_gaming_passed": entry.eval.anti_gaming_passed,
                 },
                 "versions": versions,
+                "tools": sorted(t.name for t in build_belt(entry)),
             }
         )
 
-    return {"agents": agents}
+    return {
+        "agents": agents,
+        # Scopes with no owner are infrastructure (reading the registry, writing
+        # run state) and belong to no department.
+        "scope_owners": {
+            str(scope): (str(owner) if owner else None) for scope, owner in SCOPE_OWNER.items()
+        },
+    }
 
 
 @app.get("/approvals", dependencies=[Depends(require_api_key)])

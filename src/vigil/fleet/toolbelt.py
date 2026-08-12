@@ -73,10 +73,42 @@ def _scope_index() -> dict[str, Scope]:
 #: before the guard answers instead of the tool.
 REPEAT_LIMIT = 2
 
+#: How many times one tool may come back unsuccessful before the guard stops
+#: letting the agent call it at all, whatever arguments it varies.
+FAILURE_LIMIT = 3
+
+
+def failure_recorder(
+    failures: dict[str, int],
+) -> Callable[[BaseTool, dict[str, Any], ToolContext, Any], None]:
+    """An `after_tool_callback` that counts how often each tool fails.
+
+    Pairs with the failure check in `scope_guard`. Together they close a gap the
+    repeat detector cannot: the detector compares arguments, so an agent that
+    guesses a *different* wrong value every time looks like an agent making
+    progress.
+
+    That is not hypothetical. An intake-agent handed an event with no
+    source_uri called `read_artifact` forty times with a different invented
+    filename each time, spent 192,000 tokens, hit the tool-call ceiling, and
+    ended the run before the agent that was meant to do the work was ever
+    reached. Every individual call was novel. Every one of them failed the same
+    way, which is the signal that was going unread.
+    """
+
+    def record(
+        tool: BaseTool, args: dict[str, Any], tool_context: ToolContext, tool_response: Any
+    ) -> None:
+        if isinstance(tool_response, dict) and tool_response.get("ok") is False:
+            failures[tool.name] = failures.get(tool.name, 0) + 1
+
+    return record
+
 
 def scope_guard(
     entry: AgentEntry,
     budget: RunBudget,
+    failures: dict[str, int] | None = None,
 ) -> Callable[[BaseTool, dict[str, Any], ToolContext], dict[str, Any] | None]:
     """Layer 2. A `before_tool_callback` that refuses out-of-scope calls, and
     breaks the loop when an agent stops making progress.
@@ -95,11 +127,35 @@ def scope_guard(
     """
     index = _scope_index()
     seen: dict[tuple[str, str], int] = {}
+    failed = failures if failures is not None else {}
 
     def guard(
         tool: BaseTool, args: dict[str, Any], tool_context: ToolContext
     ) -> dict[str, Any] | None:
         required = index.get(tool.name)
+
+        # A tool that has failed this many times is not going to start working
+        # because the arguments changed again. Checked before the scope lookup so
+        # the refusal costs nothing.
+        if failed.get(tool.name, 0) >= FAILURE_LIMIT:
+            audit(
+                "tool.failing_repeatedly",
+                actor=entry.name,
+                decision="denied",
+                tool=tool.name,
+                failures=failed[tool.name],
+                run_id=budget.run_id,
+            )
+            _log.warning("tool.failing_repeatedly", agent=entry.name, tool=tool.name)
+            return {
+                "ok": False,
+                "final": True,
+                "error": (
+                    f"{tool.name!r} has failed {failed[tool.name]} times in this run and will "
+                    f"not be called again. Changing the arguments will not help. Complete your "
+                    f"task without it and say in your output what you could not obtain."
+                ),
+            }
 
         # An unknown tool is a wiring bug, and a wiring bug in this component is
         # exactly what layer 2 exists to catch. Refuse rather than guess.

@@ -1,8 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { SourceBadge } from "@/components/SourceBadge";
-import { useLoaded } from "@/lib/live";
+import { ErrorScreen, LoadingScreen } from "@/components/Screen";
+import { useLive } from "@/lib/live";
+import { Handoff } from "@/components/Handoff";
+import { agentCount, useHops } from "@/lib/handoff";
 
 /**
  * The landing screen, which did not exist and should have from the start.
@@ -63,11 +65,57 @@ const SCREENS = [
   },
 ];
 
-export default function OverviewPage() {
-  const runs = useLoaded<{ runs: RunRow[] }>("/runs?limit=50", { runs: [] }, 20_000);
-  const live = runs.source === "live";
-  const rows = runs.data.runs;
+interface Step {
+  step_id: string;
+  status?: string;
+  payload?: { agent?: string } | null;
+  result?: { elapsed_s?: number; tokens?: number; tools?: number } | null;
+}
 
+/**
+ * The newest run, shown as the chain of agents that handled it.
+ *
+ * A separate component rather than another hook in the page, because the fetch
+ * has no meaningful path until a run id exists — mounting it only when there is
+ * one is simpler than teaching the loader to skip.
+ *
+ * This is the landing page's strongest evidence. The paragraph above claims five
+ * agents; a reader has no reason to believe it, and every other screen shows
+ * output that one capable assistant could equally have produced. Naming the
+ * agents that touched the most recent real run, with the seconds each spent, is
+ * the difference between an assertion and a demonstration.
+ */
+function LatestRun({ runId }: { runId: string }) {
+  const trace = useLive<{ steps: Step[]; kind?: string; status?: string }>(
+    `/runs/${runId}/trace`,
+    20_000,
+  );
+  const hops = useHops(trace.data?.steps ?? []);
+  if (hops.length === 0) return null;
+
+  return (
+    <div className="px-4 pb-4 border-t border-[var(--line-soft)] pt-3.5">
+      <div className="flex items-baseline gap-2 flex-wrap mb-2">
+        <span className="eyebrow">The most recent run</span>
+        <span className="text-[0.84rem] text-[var(--text-2)]">
+          {agentCount(hops)} agents, one after another — each with its own tools and its own
+          department&rsquo;s data
+        </span>
+      </div>
+      <Handoff hops={hops} />
+    </div>
+  );
+}
+
+export default function OverviewPage() {
+  const runs = useLive<{ runs: RunRow[] }>("/runs?limit=50", 20_000);
+
+  if (runs.status === "loading") return <LoadingScreen what="the fleet" />;
+  if (runs.status === "error" || !runs.data) {
+    return <ErrorScreen what="what the fleet has run" error={runs.error} onRetry={runs.retry} />;
+  }
+
+  const rows = runs.data.runs;
   const held = rows.filter((r) => r.status === "awaiting_human").length;
   const done = rows.filter((r) => r.status === "done").length;
 
@@ -99,11 +147,15 @@ export default function OverviewPage() {
         <div className="panel mt-8 overflow-hidden">
           <div className="panel-head">
             <span className="eyebrow">Right now</span>
-            <SourceBadge source={live ? "live" : "fixture"} error={runs.error} />
+            {runs.error && (
+              <span className="chip chip-wait" title={runs.error}>
+                reconnecting
+              </span>
+            )}
           </div>
           <div className="p-4 grid grid-cols-3 gap-4">
             <div>
-              <p className="mono text-[1.6rem] leading-none">{live ? rows.length : "—"}</p>
+              <p className="mono text-[1.6rem] leading-none">{rows.length}</p>
               <p className="eyebrow mt-1.5">runs handled</p>
             </div>
             <div>
@@ -111,21 +163,16 @@ export default function OverviewPage() {
                 className="mono text-[1.6rem] leading-none"
                 style={held > 0 ? { color: "var(--amber)" } : undefined}
               >
-                {live ? held : "—"}
+                {held}
               </p>
               <p className="eyebrow mt-1.5">waiting on a human</p>
             </div>
             <div>
-              <p className="mono text-[1.6rem] leading-none">{live ? done : "—"}</p>
+              <p className="mono text-[1.6rem] leading-none">{done}</p>
               <p className="eyebrow mt-1.5">finished on their own</p>
             </div>
           </div>
-          {!live && (
-            <p className="px-4 pb-4 text-[0.86rem] text-[var(--text-2)]">
-              No backend is answering, so the screens below show committed sample data. Every
-              one of them says which it is showing.
-            </p>
-          )}
+          {rows.length > 0 && <LatestRun runId={rows[0].run_id} />}
         </div>
 
         {/* Where to go, and what to look at when you get there. */}

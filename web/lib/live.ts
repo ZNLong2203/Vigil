@@ -1,49 +1,78 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { type Loaded, isConfigured, withFallback } from "./api";
+import { useCallback, useEffect, useState } from "react";
+import { read } from "./api";
 import type { Department, Decision, TimelineEvent } from "./types";
 
 /**
- * Read live data if there is any, otherwise the committed fixtures.
+ * One reader for every screen: loading, then either data or an error.
  *
- * Client-side rather than at build time on purpose: the UI is a static export,
- * so anything fetched during the build would be frozen at the moment the image
- * was made. A judge opening the page an hour after a demo run should see that
- * run, not a snapshot of an empty database.
+ * There is no third outcome any more. When this returned a fixture on failure,
+ * a screen could look complete while the backend was unreachable, and for the
+ * whole life of the deployment that is exactly what happened — the browser could
+ * not authenticate, every request failed, and every page quietly rendered
+ * committed sample data instead. The failure had nowhere to surface.
+ *
+ * Client-side rather than at build time, because the UI is a static export:
+ * anything fetched during the build would be frozen at the moment the image was
+ * made, and a judge opening the page after a demo run should see that run.
  */
-export function useLoaded<T>(path: string, fixture: T, pollMs = 0): Loaded<T> & { loading: boolean } {
-  const [state, setState] = useState<Loaded<T>>({ data: fixture, source: "fixture" });
-  const [loading, setLoading] = useState(isConfigured());
+
+export interface Live<T> {
+  status: "loading" | "ready" | "error";
+  data: T | null;
+  error?: string;
+  /** Re-run the request now, without waiting for the next poll. */
+  retry: () => void;
+}
+
+export function useLive<T>(path: string | null, pollMs = 0): Live<T> {
+  const [state, setState] = useState<{ status: Live<T>["status"]; data: T | null; error?: string }>({
+    status: "loading",
+    data: null,
+  });
+  const [attempt, setAttempt] = useState(0);
+  const retry = useCallback(() => setAttempt((n) => n + 1), []);
 
   useEffect(() => {
+    if (!path) return;
     let cancelled = false;
 
-    const read = async () => {
-      const result = await withFallback(path, fixture);
-      if (!cancelled) {
-        setState(result);
-        setLoading(false);
+    const load = async () => {
+      try {
+        const data = await read<T>(path);
+        if (!cancelled) setState({ status: "ready", data });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (cancelled) return;
+        // A poll that fails after a good read keeps the data on screen and says
+        // so, rather than throwing away a working view over one bad request.
+        setState((prev) =>
+          prev.status === "ready"
+            ? { status: "ready", data: prev.data, error: message }
+            : { status: "error", data: null, error: message },
+        );
       }
     };
 
-    read();
-    if (!pollMs) return () => {
-      cancelled = true;
-    };
+    load();
+    if (!pollMs) {
+      return () => {
+        cancelled = true;
+      };
+    }
 
     // Polling exists for one reason: a fleet run takes about a minute, and a
     // screen frozen for a minute reads as broken. Cheap reads, generous
     // interval — this is a demo surface, not a dashboard for a thousand users.
-    const timer = setInterval(read, pollMs);
+    const timer = setInterval(load, pollMs);
     return () => {
       cancelled = true;
       clearInterval(timer);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path, pollMs]);
+  }, [path, pollMs, attempt]);
 
-  return { ...state, loading };
+  return { ...state, retry };
 }
 
 // ── Mapping the audit trail onto the timeline ────────────────────────────────

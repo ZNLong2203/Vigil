@@ -1,6 +1,6 @@
 "use client";
 
-import { useLoaded } from "@/lib/live";
+import { useLive } from "@/lib/live";
 
 /**
  * The dot beside the wordmark. It means something or it does not move.
@@ -23,17 +23,20 @@ interface RunRow {
 }
 
 export function FleetPulse() {
-  const runs = useLoaded<{ runs: RunRow[] }>("/runs?limit=20", { runs: [] }, 20_000);
+  const runs = useLive<{ runs: RunRow[] }>("/runs?limit=20", 20_000);
 
-  const rows = runs.source === "live" ? runs.data.runs : [];
+  const rows = runs.data?.runs ?? [];
+  const unreachable = runs.status === "error";
   const working = rows.some((r) => r.status === "running");
   const waiting = rows.some((r) => r.status === "awaiting_human");
 
-  const [colour, label] = working
-    ? ["var(--phosphor)", "an agent is working"]
-    : waiting
-      ? ["var(--amber)", "waiting on a human"]
-      : ["var(--text-2)", "idle"];
+  const [colour, label] = unreachable
+    ? ["var(--rose)", "the service is not answering"]
+    : working
+      ? ["var(--phosphor)", "an agent is working"]
+      : waiting
+        ? ["var(--amber)", "waiting on a human"]
+        : ["var(--text-2)", "idle"];
 
   return (
     <span

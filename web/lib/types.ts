@@ -53,61 +53,11 @@ export interface TimelineEvent {
   conflicts_with?: string;
 }
 
-export interface Approval {
-  id: string;
-  requested_by: AgentName;
-  department: Department;
-  action: string;
-  rationale: string;
-  /** Why the policy engine refused to let this proceed unattended. */
-  gate_reason: string;
-  risk: "low" | "medium" | "high";
-  confidence: number;
-  evidence: { label: string; source_uri: string }[];
-  requested_at: string;
-  run_id: string;
-}
-
-export interface TraceSpan {
-  span_id: string;
-  parent_id: string | null;
-  name: string;
-  actor: AgentName | "api" | "policy" | "guardrail";
-  department?: Department;
-  model?: string;
-  tokens?: number;
-  cost_usd?: number;
-  duration_ms: number;
-  decision: Decision;
-  note?: string;
-  depth: number;
-}
-
-export interface Trace {
-  trace_id: string;
-  run_id: string;
-  started_at: string;
-  total_ms: number;
-  total_tokens: number;
-  total_cost_usd: number;
-  outcome: Decision;
-  headline: string;
-  spans: TraceSpan[];
-}
-
-export interface IntakeArtifact {
-  id: string;
-  kind: "photo" | "voice_note" | "document";
-  filename: string;
-  /** What makes this input hard — the messiness is the point. */
-  difficulty: string;
-  bytes: number;
-  extracted: Record<string, string | number | boolean | null>;
-  redactions: number;
-  blocked?: { reason: string; excerpt: string };
-  duration_ms: number;
-  model: string;
-}
+// Approval, TraceSpan, Trace and IntakeArtifact were declared here to give the
+// committed fixture corpus a shape. The corpus is gone and every screen now
+// reads the deployed API, so the types that described authored data went with
+// it; what remains are the shapes the service actually returns, declared beside
+// the component that reads them.
 
 export const DEPARTMENT_LABEL: Record<Department, string> = {
   family: "Family",

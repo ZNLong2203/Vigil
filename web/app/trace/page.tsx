@@ -1,19 +1,18 @@
 "use client";
 
 import { useState } from "react";
-import { TraceExplorer } from "@/components/TraceExplorer";
 import { LiveTrace } from "@/components/LiveTrace";
-import { SourceBadge } from "@/components/SourceBadge";
-import { useLoaded } from "@/lib/live";
-import { TRACE } from "@/lib/mock";
+import { EmptyScreen, ErrorScreen, LoadingScreen } from "@/components/Screen";
+import { useLive } from "@/lib/live";
 
 /**
  * Reasoning trace — the operator surface.
  *
- * Live where there are runs to show, and the committed sample otherwise. The
- * sample is not a stand-in for a missing feature: it is a worked example of the
- * one run worth studying, the document whose injection was blocked, kept so the
- * screen means something to a reader with no backend attached.
+ * Every run here is one the deployed fleet actually performed. There used to be
+ * a committed worked example shown whenever no runs were readable; it described
+ * a real scenario, but it meant this screen could present a blocked injection
+ * that had never happened on this deployment, which is precisely the claim a
+ * viewer has the most reason to want checked.
  */
 
 interface RunRow {
@@ -26,20 +25,19 @@ interface RunRow {
 
 export default function TracePage() {
   const [selected, setSelected] = useState<string | null>(null);
-  const runs = useLoaded<{ runs: RunRow[] }>("/runs?limit=25", { runs: [] }, 20_000);
-  const live = runs.source === "live" && runs.data.runs.length > 0;
+  const runs = useLive<{ runs: RunRow[] }>("/runs?limit=25", 20_000);
 
-  if (!live) {
+  if (runs.status === "loading") return <LoadingScreen what="the runs" />;
+  if (runs.status === "error" || !runs.data) {
+    return <ErrorScreen what="the list of runs" error={runs.error} onRetry={runs.retry} />;
+  }
+
+  if (runs.data.runs.length === 0) {
     return (
-      <div className="h-full flex flex-col">
-        <div className="px-4 py-2 border-b border-[var(--line-soft)] flex items-center gap-2">
-          <SourceBadge source="fixture" error={runs.error} />
-          <span className="eyebrow">worked example — no runs to read</span>
-        </div>
-        <div className="flex-1 min-h-0">
-          <TraceExplorer trace={TRACE} />
-        </div>
-      </div>
+      <EmptyScreen
+        title="No run has been traced yet."
+        detail="This screen shows every decision one run made, in the order it made them. Send something through Intake and the run appears here while it is still working."
+      />
     );
   }
 
@@ -54,7 +52,7 @@ export default function TracePage() {
         data-density="dense"
         className="px-3 py-2 border-b border-[var(--line-soft)] flex items-center gap-2 overflow-x-auto"
       >
-        <SourceBadge source="live" />
+        <span className="eyebrow shrink-0">Runs</span>
         {runs.data.runs.slice(0, 12).map((run) => {
           const active = run.run_id === current;
           const held = run.status === "awaiting_human";

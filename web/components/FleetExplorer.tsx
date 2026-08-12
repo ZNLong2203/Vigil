@@ -3,9 +3,15 @@
 import { useState } from "react";
 import { FleetGraph } from "@/components/FleetGraph";
 import { Callout, ScreenIntro } from "@/components/ScreenIntro";
-import { SourceBadge } from "@/components/SourceBadge";
-import { useLoaded } from "@/lib/live";
-import { DENIED_EDGES, REGISTRY, type RegistryEntry, type VersionRecord } from "@/lib/registry";
+import { ErrorScreen, LoadingScreen } from "@/components/Screen";
+import {
+  DEPARTMENT_BANDS,
+  useBoundaries,
+  useRegistry,
+  useRuntimeDenials,
+  type DeniedEdge,
+  type RegistryEntry,
+} from "@/lib/registry";
 import { DEPARTMENT_LABEL, type Department } from "@/lib/types";
 
 /**
@@ -193,46 +199,29 @@ function EntryDetail({ entry }: { entry: RegistryEntry }) {
 
 export function FleetExplorer() {
   const [selected, setSelected] = useState<string>("meds-agent");
-  const loaded = useLoaded<{ agents: LiveAgent[] }>("/registry", { agents: [] });
+  const registry = useRegistry();
+  const runtimeDenials = useRuntimeDenials();
 
-  const liveAgent = loaded.data.agents.find((a) => a.name === selected);
-  const liveVersions = liveAgent?.versions ?? [];
-  const source = loaded.source === "live" ? "live" : "fixture";
+  if (registry.status === "loading") return <LoadingScreen what="the agent registry" />;
+  if (registry.status === "error" || registry.entries.length === 0) {
+    return (
+      <ErrorScreen
+        what="the agent registry"
+        error={registry.error}
+        onRetry={registry.retry}
+      />
+    );
+  }
 
-  // Scopes and capabilities come from the deployed registry when one answers.
-  // The committed copy exists so the page opens without a backend, but it must
-  // not be the thing on screen when the real catalogue is reachable: a UI
-  // showing a stale copy of a boundary is worse than one showing none, because
-  // the whole claim of this screen is that the boundaries are real.
-  //
-  // Layout positions stay local — where a box sits is presentation, not state.
-  const local = REGISTRY.find((r) => r.name === selected) ?? REGISTRY[0];
-  const entry: RegistryEntry = liveAgent
-    ? {
-        ...local,
-        version: liveAgent.version,
-        summary: liveAgent.summary,
-        tool_scopes: liveAgent.tool_scopes as RegistryEntry["tool_scopes"],
-        callable_by: liveAgent.callable_by as RegistryEntry["callable_by"],
-        capability: { input: liveAgent.accepts, output: liveAgent.returns },
-        eval: {
-          suite: liveAgent.eval.suite,
-          score: liveAgent.eval.score,
-          cases: liveAgent.eval.cases,
-          anti_gaming_passed: liveAgent.eval.anti_gaming_passed,
-        },
-      }
-    : local;
+  const graph = registry.entries;
+  const entry = graph.find((r) => r.name === selected) ?? graph[0];
+  const versions = entry.versions;
 
-  const graph: RegistryEntry[] = loaded.data.agents.length
-    ? REGISTRY.map((r) => {
-        const remote = loaded.data.agents.find((a) => a.name === r.name);
-        return remote ? { ...r, version: remote.version } : r;
-      })
-    : REGISTRY;
-
-  const denial = DENIED_EDGES[0];
-  const history: VersionRecord[] = local.history;
+  // What the selected agent cannot reach. Shown for one agent at a time because
+  // every agent is outside most departments — drawing all of them at once is a
+  // diagram of the obvious, while one selected agent answers the question a
+  // reader actually has: what is this one kept away from?
+  const denied = useBoundaries(entry, registry.scopeOwners);
 
   return (
     <div data-density="calm" className="h-full overflow-y-auto">
@@ -241,8 +230,14 @@ export function FleetExplorer() {
           title="Fleet registry"
           aside={
             <>
-              <SourceBadge source={source} error={loaded.error} />
-              <span className="eyebrow">{graph.length} agents · 4 boundaries</span>
+              {registry.error && (
+                <span className="chip chip-wait" title={registry.error}>
+                  reconnecting
+                </span>
+              )}
+              <span className="eyebrow">
+                {graph.length} agents · {DEPARTMENT_BANDS.length} boundaries
+              </span>
             </>
           }
         >
@@ -252,19 +247,22 @@ export function FleetExplorer() {
           re-checked anyway.
         </ScreenIntro>
 
-        <div className="mb-4">
-          <Callout tone="deny">
-            <strong>The dashed red line is the interesting part.</strong> The benefits agent
-            reached for a clinical note to fill in a form faster. It was refused, the refusal
-            was recorded, and it took the legitimate route instead — a request routed through
-            the orchestrator. No prompt could have widened that boundary.
-          </Callout>
-        </div>
+        {denied.length > 0 && (
+          <div className="mb-4">
+            <Callout tone="deny">
+              <strong>The dashed red lines are the interesting part.</strong> They are the
+              departments <span className="mono">{entry.name}</span> cannot reach. It is not
+              told to stay out — it is never handed a tool that would take it there, so there
+              is no declaration in its context to call. Selecting a different agent redraws
+              the boundaries around that one.
+            </Callout>
+          </div>
+        )}
 
         <div className="panel p-3 mb-4">
           <FleetGraph
             registry={graph}
-            denied={DENIED_EDGES}
+            denied={denied}
             selected={selected}
             onSelect={setSelected}
           />
@@ -277,13 +275,10 @@ export function FleetExplorer() {
             <div className="panel overflow-hidden">
               <div className="panel-head">
                 <span className="eyebrow">Version history — decided by the eval gate</span>
-                <span className="eyebrow">
-                  {source === "live" ? liveVersions.length : history.length} records
-                </span>
+                <span className="eyebrow">{versions.length} records</span>
               </div>
-              {(source === "live" ? liveVersions : history).some(
-                (v) => ("status" in v ? v.status : "") === "rejected",
-              ) && (
+
+              {versions.some((v) => v.status === "rejected") && (
                 <div className="px-3 pt-3">
                   <Callout tone="deny">
                     <strong>This agent tried to improve itself and was refused.</strong> The
@@ -294,47 +289,84 @@ export function FleetExplorer() {
                   </Callout>
                 </div>
               )}
-              <ul>
-                {source === "live"
-                  ? liveVersions.map((v) => (
-                      <VersionRow
-                        key={v.id}
-                        version={v.version ?? v.id}
-                        status={v.status ?? "unknown"}
-                        score={v.eval_score}
-                        antiGaming={v.anti_gaming_passed !== false}
-                        reason={v.reason}
-                        refusalBefore={v.refusal_rate_before}
-                        refusalAfter={v.refusal_rate_after}
-                        perCase={v.per_case}
-                      />
-                    ))
-                  : history.map((record) => (
-                      <VersionRow
-                        key={record.version}
-                        version={record.version}
-                        status={record.status}
-                        score={record.eval_score}
-                        antiGaming={record.anti_gaming_passed}
-                        reason={record.reason}
-                      />
-                    ))}
-              </ul>
+
+              {versions.length === 0 ? (
+                <p className="p-4 text-[0.86rem] text-[var(--text-2)]">
+                  No agent has proposed a change to itself yet. When one does, the gate&rsquo;s
+                  decision — and its reasoning — appears here.
+                </p>
+              ) : (
+                <ul>
+                  {versions.map((v) => (
+                    <VersionRow
+                      key={v.id}
+                      version={v.version ?? v.id}
+                      status={v.status ?? "unknown"}
+                      score={v.eval_score}
+                      antiGaming={v.anti_gaming_passed !== false}
+                      reason={v.reason}
+                      refusalBefore={v.refusal_rate_before}
+                      refusalAfter={v.refusal_rate_after}
+                      perCase={
+                        v.per_case as
+                          | { case_id: string; passed: boolean; hard: boolean; refused: boolean }[]
+                          | undefined
+                      }
+                    />
+                  ))}
+                </ul>
+              )}
             </div>
 
             <div className="panel overflow-hidden">
               <div className="panel-head">
                 <span className="eyebrow">Boundary enforcement</span>
-                <span className="chip chip-deny">1 denial</span>
+                <span className="chip chip-muted">{runtimeDenials.length} refused at call time</span>
               </div>
-              <div className="p-4">
-                <p className="text-[0.88rem]">
-                  <span className="mono">{denial.from}</span>{" "}
-                  <span className="text-[var(--text-2)]">requested</span> {denial.resource}
-                </p>
-                <p className="mt-2 text-[0.86rem] leading-relaxed text-[var(--text-1)]">
-                  {denial.outcome}
-                </p>
+              <div className="p-4 space-y-3">
+                <div>
+                  <p className="eyebrow mb-1.5">Layer 1 — assembly</p>
+                  <p className="text-[0.86rem] leading-relaxed text-[var(--text-1)]">
+                    <span className="mono">{entry.name}</span> holds{" "}
+                    {entry.tool_scopes.length} scope
+                    {entry.tool_scopes.length === 1 ? "" : "s"}, so its belt is{" "}
+                    {entry.tools?.length ?? 0} tool
+                    {(entry.tools?.length ?? 0) === 1 ? "" : "s"}
+                    {entry.tools?.length ? ": " : "."}
+                    {entry.tools?.length ? <span className="mono">{entry.tools.join(", ")}</span> : null}{" "}
+                    Everything else in the system is absent from its context entirely.
+                  </p>
+                </div>
+
+                <div>
+                  <p className="eyebrow mb-1.5">Layer 2 — every call, re-checked</p>
+                  <p className="text-[0.86rem] leading-relaxed text-[var(--text-1)]">
+                    {runtimeDenials.length === 0 ? (
+                      <>
+                        Nothing has been refused at call time, which is the expected result:
+                        layer 2 only fires if layer 1 was wired wrong. It exists because the
+                        first layer is a property of our wiring, and wiring changes.
+                      </>
+                    ) : (
+                      <>
+                        {runtimeDenials.length} call{runtimeDenials.length === 1 ? " was" : "s were"}{" "}
+                        stopped before running.
+                      </>
+                    )}
+                  </p>
+                  {runtimeDenials.length > 0 && (
+                    <ul className="mt-2 space-y-2">
+                      {runtimeDenials.map((d: DeniedEdge, i: number) => (
+                        <li key={`${d.from}-${i}`} className="text-[0.84rem]">
+                          <span className="mono">{d.from}</span>{" "}
+                          <span className="text-[var(--text-2)]">tried</span>{" "}
+                          <span className="mono">{d.resource}</span>
+                          <p className="text-[var(--text-1)] leading-relaxed">{d.outcome}</p>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
               </div>
             </div>
           </div>

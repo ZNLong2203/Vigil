@@ -164,8 +164,23 @@ body {
     100% { box-shadow: 0 0 0 0 transparent; }
   }
 
+  /* Skeleton rows, shown only while a screen waits for its first response.
+     This is the second animated thing in the interface and it obeys the same
+     rule as the first: it means "still waiting", and it is gone the moment
+     there is an answer either way. */
+  .skeleton {
+    background: var(--bg-3);
+    border-radius: 0.25rem;
+    animation: shimmer 1.6s ease-in-out infinite;
+  }
+
+  @keyframes shimmer {
+    0%, 100% { opacity: 0.4; }
+    50%      { opacity: 0.85; }
+  }
+
   @media (prefers-reduced-motion: reduce) {
-    .live-dot { animation: none; }
+    .live-dot, .skeleton { animation: none; }
   }
 
   /* ── Buttons ─────────────────────────────────────────────────────────── */

@@ -17,7 +17,13 @@ import pytest
 from vigil.fleet import registry as reg
 from vigil.fleet.budget import BudgetExceeded, RunBudget
 from vigil.fleet.scopes import EXTERNAL_EFFECT, SCOPE_OWNER, Department, Scope
-from vigil.fleet.toolbelt import REPEAT_LIMIT, build_belt, scope_guard
+from vigil.fleet.toolbelt import (
+    FAILURE_LIMIT,
+    REPEAT_LIMIT,
+    build_belt,
+    failure_recorder,
+    scope_guard,
+)
 from vigil.fleet.tools import ALL_TOOLS, scope_of
 
 
@@ -177,6 +183,52 @@ def test_argument_ordering_does_not_disguise_a_repeat(_no_firestore):
     blocked = guard(tool, {"a": 1, "b": 2}, None)
 
     assert blocked is not None and "cannot produce anything new" in blocked["error"]
+
+
+def test_a_tool_that_keeps_failing_is_taken_away(_no_firestore):
+    """The gap the repeat detector cannot see: guessing is not repeating.
+
+    In production an intake-agent handed an event with no source_uri called
+    `read_artifact` forty times, inventing a different filename on each attempt.
+    Every call was novel, so the repeat detector passed every one of them; every
+    call also failed identically. 192,000 tokens went into that loop and the run
+    ended with no budget left for the agent that was supposed to do the work.
+
+    Failures are counted per tool, not per argument list, which is the only shape
+    that catches it.
+    """
+    failures: dict[str, int] = {}
+    entry = reg.lookup("intake-agent")
+    guard = scope_guard(entry, budget(max_tool_calls=40), failures)
+    record = failure_recorder(failures)
+    tool = FakeTool("read_artifact")
+
+    # Three novel calls, three identical failures. The repeat detector sees
+    # nothing wrong with any of them.
+    for i in range(FAILURE_LIMIT):
+        assert guard(tool, {"source_uri": f"guess-{i}.pdf"}, None) is None
+        record(tool, {"source_uri": f"guess-{i}.pdf"}, None, {"ok": False, "error": "no such artifact"})
+
+    blocked = guard(tool, {"source_uri": "another-guess.pdf"}, None)
+    assert blocked is not None
+    assert blocked["final"] is True
+    assert "will not be called again" in blocked["error"]
+    assert any(e["action"] == "tool.failing_repeatedly" for e in _no_firestore)
+
+
+def test_a_tool_that_succeeds_is_never_taken_away(_no_firestore):
+    """Only failures count. A tool doing its job, repeatedly, is just work."""
+    failures: dict[str, int] = {}
+    entry = reg.lookup("meds-agent")
+    guard = scope_guard(entry, budget(max_tool_calls=40), failures)
+    record = failure_recorder(failures)
+    tool = FakeTool("read_medication_graph")
+
+    for i in range(6):
+        assert guard(tool, {"subject": f"subject-{i}"}, None) is None
+        record(tool, {"subject": f"subject-{i}"}, None, {"ok": True, "content": {}})
+
+    assert failures == {}
 
 
 def test_external_effect_is_recorded_before_it_happens(_no_firestore):

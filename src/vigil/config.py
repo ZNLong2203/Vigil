@@ -101,6 +101,11 @@ class Settings(BaseSettings):
 
     api_auth_key: str = Field(default="dev-local-key-change-me", validation_alias="VIGIL_API_KEY")
 
+    #: Whether the bundled UI may fetch the API key from /ui-config and act as a
+    #: live client. Set VIGIL_PUBLIC_UI=0 and the page opens in fixture mode with
+    #: nothing live behind it — the same story told from committed data.
+    public_ui: bool = Field(default=True, validation_alias="VIGIL_PUBLIC_UI")
+
     # ── Emulator awareness: read the same variables the Google SDKs read ──────
     @property
     def firestore_emulator(self) -> str | None:

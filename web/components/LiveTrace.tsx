@@ -1,19 +1,113 @@
 "use client";
 
-import { useLoaded } from "@/lib/live";
+import { useLive } from "@/lib/live";
+import { ErrorScreen, LoadingScreen } from "@/components/Screen";
+import { Handoff } from "@/components/Handoff";
+import { agentCount, useHops } from "@/lib/handoff";
 
 /**
- * One run's reasoning chain, read from the deployed audit trail.
+ * One run's reasoning chain, as a tree, read from the deployed audit trail.
+ *
+ * The hierarchy is the point and it is not decoration: an agent hop owns the
+ * decisions taken inside it, and a flat list of timestamps makes the reader
+ * reconstruct that ownership in their head. Nesting says directly that the two
+ * external effects belong to meds-agent's hop and the escalation belongs to the
+ * watchdog's.
+ *
+ * Structure comes from the data rather than from a shape written by hand. Each
+ * checkpoint carries the agent it was handed to and the window it ran in, so an
+ * audit entry nests under the hop whose window contains it, falling back to a
+ * match on actor for entries written just after a hop closed. What belongs to no
+ * hop — the event arriving, the run finishing — sits at the root, which is
+ * exactly where those things happened.
  *
  * Dense, because the point of an operator surface is seeing the whole run at
- * once. What keeps it legible is that there is one primary read — the order
- * decisions were taken in — and everything an engineer needs but a reader does
- * not (step ids, keys, timings) sits at --text-2 until the row is hovered.
+ * once. What keeps it legible is that there is one primary read, the path down
+ * the tree, carried by indentation and the duration bars; everything an engineer
+ * needs but a reader does not sits at --text-2 until the row is hovered.
  *
  * Refusals are the rows worth finding, so they are the rows that carry colour.
  * A trace where nothing was refused should look uneventful; that is information
  * too.
  */
+
+const ACTOR_TINT: Record<string, string> = {
+  api: "var(--text-2)",
+  worker: "var(--text-2)",
+  orchestrator: "var(--phosphor)",
+  "intake-agent": "var(--phosphor)",
+  "meds-agent": "var(--azure)",
+  "benefits-agent": "var(--amber)",
+  watchdog: "var(--violet)",
+};
+
+/** Which hop, if any, owns this decision. */
+function ownerOf(entry: Entry, steps: Step[]): string | null {
+  const at = entry.at ?? "";
+  const containing = steps.find(
+    (s) => s.started_at && at >= s.started_at && (!s.completed_at || at <= s.completed_at),
+  );
+  if (containing) return containing.step_id;
+
+  // Written in the moment after the hop closed — the watchdog's own summary of
+  // its verification lands here. Actor is the right tiebreak; time alone would
+  // orphan it.
+  const byActor = steps.find((s) => s.payload?.agent === entry.actor);
+  return byActor?.step_id ?? null;
+}
+
+function Bar({ seconds, longest }: { seconds: number; longest: number }) {
+  const pct = Math.max(2, (seconds / longest) * 100);
+  return (
+    <div
+      className="h-1.5 w-full rounded-full bg-[var(--bg-3)] overflow-hidden"
+      title={`${seconds.toFixed(1)} s`}
+    >
+      <div
+        className="h-full rounded-full"
+        style={{
+          width: `${pct}%`,
+          background: "color-mix(in oklab, var(--azure) 70%, transparent)",
+        }}
+      />
+    </div>
+  );
+}
+
+function DecisionRow({ entry, depth }: { entry: Entry; depth: number }) {
+  const style = DECISION_STYLE[entry.decision] ?? DECISION_STYLE.done;
+  const notable = ["blocked", "denied", "escalated", "failed"].includes(entry.decision);
+  const text = detail(entry);
+
+  return (
+    <div
+      className="row grid-cols-[4.5rem_1fr]"
+      style={
+        notable ? { background: "color-mix(in oklab, var(--rose) 5%, transparent)" } : undefined
+      }
+    >
+      <span className="detail mono">{time(entry.at)}</span>
+      <span
+        className="flex items-baseline gap-2 min-w-0"
+        style={{ paddingLeft: `${depth * 1.15}rem` }}
+      >
+        <span className="detail mono shrink-0" aria-hidden>
+          └
+        </span>
+        <span className={`${style.chip} shrink-0`}>
+          <span aria-hidden>{style.glyph}</span>
+          {entry.decision}
+        </span>
+        <span className="truncate">
+          {ACTION_LABEL[entry.action] ?? entry.action.replace(/[._]/g, " ")}
+        </span>
+        {text && <span className="detail truncate">{text}</span>}
+      </span>
+    </div>
+  );
+}
+
+
 
 interface Entry {
   id: string;
@@ -30,7 +124,9 @@ interface Step {
   key?: string;
   started_at?: string;
   completed_at?: string;
-  result?: Record<string, unknown>;
+  /** Written when the step is claimed: which agent this hop was handed to. */
+  payload?: { agent?: string } | null;
+  result?: { elapsed_s?: number; tokens?: number; tools?: number } | null;
 }
 
 interface TraceData {
@@ -50,6 +146,9 @@ const DECISION_STYLE: Record<string, { chip: string; glyph: string }> = {
   escalated: { chip: "chip chip-wait", glyph: "↑" },
   awaiting_approval: { chip: "chip chip-wait", glyph: "⏸" },
   skipped: { chip: "chip chip-muted", glyph: "≡" },
+  // Without this, `awaiting_human` fell through to the `done` style and the run
+  // that is sitting waiting for a person was labelled with a green tick.
+  awaiting_human: { chip: "chip chip-wait", glyph: "⏸" },
   accepted: { chip: "chip chip-info", glyph: "→" },
   done: { chip: "chip chip-ok", glyph: "✓" },
 };
@@ -104,98 +203,129 @@ function Stat({ label, value }: { label: string; value: string }) {
 }
 
 export function LiveTrace({ runId }: { runId: string }) {
-  const loaded = useLoaded<TraceData | null>(`/runs/${runId}/trace`, null, 10_000);
+  const loaded = useLive<TraceData>(`/runs/${runId}/trace`, 10_000);
   const trace = loaded.data;
+  const hops = useHops(trace?.steps ?? []);
 
-  if (!trace) {
+  if (loaded.status === "loading") return <LoadingScreen what={`the trail for ${runId}`} />;
+  if (loaded.status === "error" || !trace) {
     return (
-      <div data-density="calm" className="p-6">
-        <p className="text-[var(--text-1)] text-[0.9rem]">Reading the trail for {runId}…</p>
-      </div>
+      <ErrorScreen what="this run's decision trail" error={loaded.error} onRetry={loaded.retry} />
     );
   }
 
-  const refusals = trace.entries.filter((e) =>
-    ["blocked", "denied", "escalated", "failed"].includes(e.decision),
+  // Refused and escalated are different events and were being counted as one.
+  // A refusal is the system saying no; an escalation is the system saying "a
+  // person should decide". Reporting two escalations under a heading that reads
+  // REFUSED describes a boundary violation that did not happen — on the screen
+  // whose purpose is that those two things are distinguishable.
+  const refused = trace.entries.filter((e) =>
+    ["blocked", "denied", "failed"].includes(e.decision),
   );
+  const escalated = trace.entries.filter((e) => e.decision === "escalated");
+  const stopped = refused.length + escalated.length;
+  const agents = agentCount(hops);
+
+  const owned = new Map<string, Entry[]>();
+  const rootEntries: Entry[] = [];
+  for (const entry of trace.entries) {
+    const owner = ownerOf(entry, trace.steps);
+    if (!owner) rootEntries.push(entry);
+    else owned.set(owner, [...(owned.get(owner) ?? []), entry]);
+  }
+
+  const longest = Math.max(1, ...trace.steps.map((s) => s.result?.elapsed_s ?? 0));
 
   return (
     <div className="h-full flex flex-col">
       <div className="px-4 py-3 border-b border-[var(--line-soft)]">
         <div className="flex items-baseline gap-3 flex-wrap">
           <h1 className="text-[0.98rem] font-medium">
-            {refusals.length > 0
-              ? `${trace.kind ?? "run"} — ${refusals.length} refused, ${trace.status}`
+            {stopped > 0
+              ? `${trace.kind ?? "run"} — ${[
+                  refused.length && `${refused.length} refused`,
+                  escalated.length && `${escalated.length} escalated`,
+                ]
+                  .filter(Boolean)
+                  .join(", ")}`
               : `${trace.kind ?? "run"} — handled without stopping`}
           </h1>
           <span className="mono text-[0.72rem] text-[var(--text-2)]">
             {trace.trace_id ? `trace ${trace.trace_id.slice(0, 16)}…` : `run ${trace.run_id}`}
           </span>
         </div>
+
+        {hops.length > 0 && (
+          <div className="mt-2.5">
+            <Handoff hops={hops} compact />
+          </div>
+        )}
       </div>
 
-      <div className="px-4 py-2.5 border-b border-[var(--line-soft)] grid grid-cols-2 sm:grid-cols-4 gap-4">
-        <Stat label="Steps" value={String(trace.steps.length)} />
+      <div className="px-4 py-2.5 border-b border-[var(--line-soft)] grid grid-cols-2 sm:grid-cols-6 gap-4">
+        <Stat label="Agents" value={String(agents)} />
+        <Stat label="Hops" value={String(trace.steps.length)} />
         <Stat label="Decisions" value={String(trace.entries.length)} />
-        <Stat label="Refused" value={String(refusals.length)} />
+        <Stat label="Refused" value={String(refused.length)} />
+        <Stat label="Escalated" value={String(escalated.length)} />
         <Stat label="Status" value={trace.status ?? "—"} />
       </div>
 
       <div data-density="dense" className="flex-1 min-h-0 overflow-y-auto">
-        {trace.entries.map((entry) => {
-          const style = DECISION_STYLE[entry.decision] ?? DECISION_STYLE.done;
-          const notable = ["blocked", "denied", "escalated", "failed"].includes(entry.decision);
-          const text = detail(entry);
+        {/* Root: what happened to the run itself, outside any agent's hop. */}
+        {rootEntries
+          .filter((e) => (e.at ?? "") < (trace.steps[0]?.started_at ?? "\uffff"))
+          .map((entry) => (
+            <DecisionRow key={entry.id} entry={entry} depth={0} />
+          ))}
+
+        {trace.steps.map((step) => {
+          const agent = step.payload?.agent ?? "—";
+          const seconds = step.result?.elapsed_s ?? 0;
+          const tint = ACTOR_TINT[agent] ?? "var(--text-2)";
+          const children = owned.get(step.step_id) ?? [];
 
           return (
-            <div
-              key={entry.id}
-              className="row grid-cols-[4.5rem_7rem_1fr]"
-              style={
-                notable
-                  ? { background: "color-mix(in oklab, var(--rose) 5%, transparent)" }
-                  : undefined
-              }
-            >
-              <span className="detail mono">{time(entry.at)}</span>
-              <span className="mono truncate" style={{ color: "var(--text-1)" }}>
-                {entry.actor}
-              </span>
-              <span className="flex items-baseline gap-2 min-w-0">
-                <span className={`${style.chip} shrink-0`}>
-                  <span aria-hidden>{style.glyph}</span>
-                  {entry.decision}
+            <div key={step.step_id}>
+              <div className="row grid-cols-[4.5rem_1fr_7rem_5rem]">
+                <span className="detail mono">{time(step.started_at)}</span>
+                <span className="flex items-center gap-2 min-w-0">
+                  <span
+                    className="w-1.5 h-1.5 rounded-full shrink-0"
+                    style={{ background: tint }}
+                    aria-hidden
+                  />
+                  <span className="mono truncate" style={{ color: "var(--text-0)" }}>
+                    {agent}
+                  </span>
+                  <span
+                    className={step.status === "done" ? "chip chip-ok" : "chip chip-wait"}
+                  >
+                    {step.status}
+                  </span>
+                  <span className="detail truncate" title={step.key}>
+                    {step.step_id}
+                  </span>
                 </span>
-                <span className="truncate">
-                  {ACTION_LABEL[entry.action] ?? entry.action.replace(/[._]/g, " ")}
+                <Bar seconds={seconds} longest={longest} />
+                <span className="detail mono text-right">
+                  {step.result?.tokens ? `${step.result.tokens.toLocaleString()} tok` : ""}
                 </span>
-                {text && <span className="detail truncate">{text}</span>}
-              </span>
+              </div>
+
+              {children.map((entry) => (
+                <DecisionRow key={entry.id} entry={entry} depth={1} />
+              ))}
             </div>
           );
         })}
 
-        {trace.steps.length > 0 && (
-          <>
-            <div className="px-3 py-2 border-y border-[var(--line-soft)]">
-              <span className="eyebrow">Checkpoints — one idempotency claim per step</span>
-            </div>
-            {trace.steps.map((step) => (
-              <div key={step.step_id} className="row grid-cols-[1fr_6rem_10rem]">
-                <span className="mono truncate">{step.step_id}</span>
-                <span
-                  className={step.status === "done" ? "chip chip-ok" : "chip chip-wait"}
-                  style={{ justifySelf: "start" }}
-                >
-                  {step.status}
-                </span>
-                <span className="detail mono truncate" title={step.key}>
-                  {step.key ? `key ${step.key.slice(0, 12)}…` : ""}
-                </span>
-              </div>
-            ))}
-          </>
-        )}
+        {/* Root: how the run ended. */}
+        {rootEntries
+          .filter((e) => (e.at ?? "") >= (trace.steps[0]?.started_at ?? "\uffff"))
+          .map((entry) => (
+            <DecisionRow key={entry.id} entry={entry} depth={0} />
+          ))}
       </div>
     </div>
   );

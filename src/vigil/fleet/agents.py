@@ -26,7 +26,7 @@ from vigil.config import get_settings
 from vigil.fleet import schemas
 from vigil.fleet.budget import RunBudget
 from vigil.fleet.registry import AgentEntry, lookup
-from vigil.fleet.toolbelt import build_belt, scope_guard
+from vigil.fleet.toolbelt import build_belt, failure_recorder, scope_guard
 
 # Shared preamble. Repeated in every agent because an instruction the model does
 # not see is an instruction that does not exist.
@@ -227,6 +227,12 @@ def build_agent(name: str, budget: RunBudget) -> LlmAgent:
     entry = lookup(name)
     instruction = COMMON + INSTRUCTIONS[name]
 
+    # Shared between the two callbacks: the after-callback counts failures, the
+    # before-callback refuses once a tool has failed enough times. One dict per
+    # agent per run, so a tool that is broken for this input does not stay
+    # blocked for the next one.
+    failures: dict[str, int] = {}
+
     return LlmAgent(
         model=resolve_model(entry),
         name=entry.runtime_name,
@@ -234,7 +240,8 @@ def build_agent(name: str, budget: RunBudget) -> LlmAgent:
         instruction=instruction.strip(),
         tools=build_belt(entry),
         output_schema=OUTPUT_SCHEMA[name],
-        before_tool_callback=scope_guard(entry, budget),
+        before_tool_callback=scope_guard(entry, budget, failures),
+        after_tool_callback=failure_recorder(failures),
     )
 
 

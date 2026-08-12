@@ -272,3 +272,74 @@ def test_nothing_is_registered_for_compensation_until_it_succeeds(_stub_persiste
 
     saga.compensate(reason="test")
     assert order == []
+
+
+# ── The tools that agents actually call ──────────────────────────────────────
+
+
+def test_proposing_a_schedule_change_reaches_the_approvals_queue(monkeypatch):
+    """The tool has to go through the gate, not around it.
+
+    It did not. `propose_schedule_change` wrote its own document into a
+    `proposals` collection and returned; the gate was never called, so the
+    proposal was never evaluated by the policy engine and never entered the
+    approvals queue the carer decides from. Two mechanisms for one idea, running
+    past each other.
+
+    What hid it was the fixture corpus. The Approvals screen had committed sample
+    cards, so it looked populated and working; the gap only became visible when
+    the sample data was deleted and the screen came up empty against a system
+    that had just produced two proposals.
+    """
+    from vigil.fleet import tools
+
+    approvals: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        act, "_request_approval", lambda req, dec: (approvals.append({"req": req, "dec": dec}), "ap-1")[1]
+    )
+    # If the gate is bypassed, this is what gets written instead — and nothing
+    # should reach it, because a clinical change is never auto-allowed.
+    written: list[Any] = []
+    monkeypatch.setattr(tools, "_write_schedule_change", lambda *a: written.append(a))
+
+    result = tools.propose_schedule_change(
+        run_id="r-1",
+        medication="Cardiolex",
+        to_time="12:00",
+        reason="five medications collide at 08:00",
+        confidence=0.91,
+    )
+
+    assert result["status"] == "awaiting_approval"
+    assert result["approval_id"] == "ap-1"
+    assert written == [], "a clinical change must never be applied without a human"
+
+    assert len(approvals) == 1
+    request_made = approvals[0]["req"]
+    assert request_made.actor == "meds-agent"
+    assert request_made.scope is Scope.SCHEDULE_WRITE
+    assert request_made.payload["medication"] == "Cardiolex"
+    # The rule that stopped it is the one a person should be shown.
+    assert approvals[0]["dec"].rule_id == "approve.clinical"
+
+
+def test_confidence_reaches_the_gate_rather_than_being_assumed():
+    """The number the agent reports is the number the policy engine judges."""
+    from vigil.fleet import tools
+
+    seen: list[ActionRequest] = []
+    original = act.evaluate
+
+    def spy(req: ActionRequest):
+        seen.append(req)
+        return original(req)
+
+    act.evaluate = spy
+    try:
+        tools.propose_schedule_change(
+            run_id="r-1", medication="Ferrogen", to_time="14:00", reason="absorption", confidence=0.42
+        )
+    finally:
+        act.evaluate = original
+
+    assert seen and seen[0].confidence == 0.42

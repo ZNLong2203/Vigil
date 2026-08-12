@@ -35,7 +35,7 @@ export function FleetGraph({
   selected: string;
   onSelect: (name: string) => void;
 }) {
-  const byName = new Map(registry.map((r) => [r.name, r]));
+  const byName = new Map<string, RegistryEntry>(registry.map((r) => [r.name, r]));
   const root = registry.find((r) => r.name === "orchestrator")!;
   const workers = registry.filter((r) => r.name !== "orchestrator");
 
@@ -91,59 +91,75 @@ export function FleetGraph({
         />
       ))}
 
-      {/* ── The refused call. ────────────────────────────────────────────
-          
-          The line stops at the barrier rather than passing through it. An
-          earlier version drew straight from one box to the other with a label
-          floating in the gap: the label collided with the box it was pointing
-          past, and a line that reaches its destination is a poor way to show a
-          call that never arrived. Now it travels partway and halts, which is
-          what happened. The written explanation lives in the callout above the
-          figure, where there is room for it. */}
-      {denied.map((d) => {
-        const from = byName.get(d.from);
-        const target = registry.find((r) => r.owner === d.to_department);
-        if (!from || !target) return null;
-        const start = from.pos.x - NODE_W / 2 - 4;
-        const end = target.pos.x + NODE_W / 2 + 4;
-        const barrier = (start + end) / 2;
+      {/* ── The boundary the selected agent is sealed inside. ─────────────
+
+          Drawn as an enclosure rather than as lines reaching outward, and the
+          route to that is worth recording because two earlier versions were
+          confidently wrong in ways that only arithmetic caught.
+
+          The first drew one hand-written denial as a line between two boxes.
+          When the data became real, one agent had a boundary against every other
+          department, and that code inherited an assumption it never stated —
+          that the target lies to the left — so every rightward line was drawn
+          back through the agent's own box. Fixing the direction was not enough:
+          a line aimed at "some agent in the audit department" resolved to
+          whichever agent happened to be first in the list, which for `family` is
+          the orchestrator sitting well below the row, and long lines to distant
+          departments cut straight across the boxes in between.
+
+          The mistake underneath both was the metaphor. "Cannot reach department
+          D" is not an arrow pointing at a member of D. Checked against the
+          deployed registry, every agent holds only scopes its own department
+          owns — no exceptions — so the true shape is a closed boundary around
+          the agent's own band. It cannot collide with anything, it does not have
+          to choose a representative agent, and it stays correct as the fleet
+          grows. The departments it is kept out of are named in the panel beside
+          the figure, where there is room to list the scopes as well. */}
+      {(() => {
+        const agent = byName.get(selected);
+        const band = DEPARTMENT_BANDS.find((b) => b.id === agent?.owner);
+        if (!agent || !band || denied.length === 0) return null;
+
+        const left = band.x;
+        const right = band.x + band.width;
+        const y = agent.pos.y;
+        const blocked = denied.map((d) => d.to_department).join(", ");
+
         return (
-          <g key={`denied-${d.from}`}>
-            <title>{`${d.from} attempted to read ${d.resource} — refused by Agent Identity`}</title>
-            <line
-              x1={start}
-              y1={from.pos.y}
-              x2={barrier + 12}
-              y2={from.pos.y}
+          <g>
+            <title>
+              {`${agent.name} holds only ${agent.owner} scopes. It is never handed a tool belonging to ${blocked}.`}
+            </title>
+            <rect
+              x={left}
+              y={30}
+              width={band.width}
+              height={150}
+              rx={10}
+              fill="none"
               stroke="var(--rose)"
-              strokeWidth={1.75}
-              strokeDasharray="5 4"
+              strokeWidth={1.5}
+              strokeDasharray="6 4"
+              opacity={0.9}
             />
-            {/* The boundary it did not cross. */}
-            <line
-              x1={barrier}
-              y1={from.pos.y - 26}
-              x2={barrier}
-              y2={from.pos.y + 26}
-              stroke="var(--rose)"
-              strokeWidth={1}
-              strokeDasharray="2 3"
-              opacity={0.55}
-            />
-            <circle cx={barrier} cy={from.pos.y} r={12} fill="#0d1219" stroke="var(--rose)" strokeWidth={1.75} />
-            <text
-              x={barrier}
-              y={from.pos.y + 4.5}
-              textAnchor="middle"
-              fontSize="13"
-              fill="var(--rose)"
-              aria-hidden
-            >
-              ⊘
-            </text>
+            {[left, right].map((x) => (
+              <g key={`seal-${x}`}>
+                <circle cx={x} cy={y} r={11} fill="#0d1219" stroke="var(--rose)" strokeWidth={1.5} />
+                <text
+                  x={x}
+                  y={y + 4}
+                  textAnchor="middle"
+                  fontSize="12"
+                  fill="var(--rose)"
+                  aria-hidden
+                >
+                  ⊘
+                </text>
+              </g>
+            ))}
           </g>
         );
-      })}
+      })()}
 
       {/* ── Agents ───────────────────────────────────────────────────── */}
       {registry.map((entry) => {

@@ -1,40 +1,55 @@
 /**
- * Agent Registry — mock of the Firestore `registry` collection.
+ * The agent registry, read from the service, positioned by this file.
  *
- * This is a track deliverable, not a nicety: the Fortified Enterprise Fleet
- * category requires showing how agents are catalogued for cross-department use.
- * An entry is what one department has to read to decide whether it may call
- * something another department owns.
+ * This module used to hold a hand-written copy of the catalogue. That copy was
+ * the fleet screen's only source, so the page showed five agents, their scopes
+ * and their version history whether or not any of it still matched what was
+ * deployed — including the rejected version, the single most load-bearing claim
+ * the project makes. A second copy of a fact is a fact that can be wrong.
  *
- * The version history carries the other half of the story — an agent proposing
- * an improvement to itself, and the anti-gaming judge refusing one. See
- * docs/adr/006-eval-gate-and-anti-gaming-judge.md.
+ * What stays here is the part the API has no business knowing: where each box
+ * sits. Coordinates are hand-placed rather than force-directed because a demo
+ * needs the same frame on every take, and a graph that rearranges itself between
+ * renders cannot be filmed twice.
  */
 
+import { useLive, type Live } from "./live";
 import type { AgentName, Department } from "./types";
 
 export interface VersionRecord {
+  id: string;
   version: string;
-  status: "promoted" | "rejected" | "superseded";
-  eval_score: number;
-  anti_gaming_passed: boolean;
-  at: string;
+  status?: "promoted" | "rejected" | "superseded";
+  eval_score?: number;
+  anti_gaming_passed?: boolean;
+  refusal_rate_before?: number;
+  refusal_rate_after?: number;
+  at?: string;
   /** Present on rejections. This field is the point of the whole mechanism. */
   reason?: string;
+  per_case?: unknown;
 }
 
-export interface RegistryEntry {
+/** As the API returns it. */
+export interface ApiAgent {
+  /** The tool names build_belt actually assembles for this agent. */
+  tools?: string[];
   name: AgentName;
   version: string;
   owner: Department;
   summary: string;
-  capability: { input: string; output: string };
+  accepts: string;
+  returns: string;
   tool_scopes: string[];
   callable_by: AgentName[];
   eval: { suite: string; score: number; cases: number; anti_gaming_passed: boolean };
-  promoted_at: string;
+  versions: VersionRecord[];
+}
+
+/** An agent plus the one thing the API does not supply: where to draw it. */
+export interface RegistryEntry extends ApiAgent {
+  capability: { input: string; output: string };
   history: VersionRecord[];
-  /** Layout is hand-placed so every take of the demo frames identically. */
   pos: { x: number; y: number };
 }
 
@@ -47,112 +62,17 @@ export interface DeniedEdge {
   outcome: string;
 }
 
-export const REGISTRY: RegistryEntry[] = [
-  {
-    name: "orchestrator",
-    version: "2.1.0",
-    owner: "family",
-    summary:
-      "Routes work, owns budgets and checkpoints, assigns idempotency keys. Holds no business tools of its own — it can only look agents up and call them.",
-    capability: { input: "CleanEvent", output: "RunPlan" },
-    tool_scopes: ["registry:read", "state:write"],
-    callable_by: [],
-    eval: { suite: "routing-v4", score: 0.93, cases: 30, anti_gaming_passed: true },
-    promoted_at: "2026-08-08T10:20:00Z",
-    history: [
-      { version: "2.1.0", status: "promoted", eval_score: 0.93, anti_gaming_passed: true, at: "2026-08-08T10:20:00Z" },
-      { version: "2.0.4", status: "superseded", eval_score: 0.9, anti_gaming_passed: true, at: "2026-08-05T14:02:00Z" },
-    ],
-    pos: { x: 500, y: 296 },
-  },
-  {
-    name: "intake-agent",
-    version: "1.7.1",
-    owner: "family",
-    summary:
-      "Turns photos, voice notes and scans into structured events. Writes to staging only — it can never cause an external side effect.",
-    capability: { input: "RawArtifact", output: "StructuredEvent" },
-    tool_scopes: ["storage:read", "staging:write"],
-    callable_by: ["orchestrator"],
-    eval: { suite: "extraction-v6", score: 0.89, cases: 24, anti_gaming_passed: true },
-    promoted_at: "2026-08-09T08:44:00Z",
-    history: [
-      { version: "1.7.1", status: "promoted", eval_score: 0.89, anti_gaming_passed: true, at: "2026-08-09T08:44:00Z" },
-      { version: "1.7.0", status: "superseded", eval_score: 0.86, anti_gaming_passed: true, at: "2026-08-06T11:15:00Z" },
-    ],
-    pos: { x: 140, y: 108 },
-  },
-  {
-    name: "meds-agent",
-    version: "1.4.2",
-    owner: "clinical",
-    summary:
-      "Medication schedule, collision and interaction detection, reminders. Reads the medication graph; may write a schedule but never a clinical record.",
-    capability: { input: "MedicationContext", output: "ScheduleProposal" },
-    tool_scopes: ["medgraph:read", "schedule:write"],
-    callable_by: ["orchestrator", "watchdog"],
-    eval: { suite: "meds-v3", score: 0.91, cases: 20, anti_gaming_passed: true },
-    promoted_at: "2026-08-10T16:31:00Z",
-    history: [
-      {
-        version: "1.5.0-rc",
-        status: "rejected",
-        eval_score: 0.94,
-        anti_gaming_passed: false,
-        at: "2026-08-11T02:14:00Z",
-        reason:
-          "Score rose because the proposal declined 3 of 20 hard cases instead of answering them, and the suite counted a refusal as a pass. Judge found the instruction had been rewritten to add \"if uncertain, defer to the carer\" — which reads as caution but is scored as success. Not a real improvement.",
-      },
-      { version: "1.4.2", status: "promoted", eval_score: 0.91, anti_gaming_passed: true, at: "2026-08-10T16:31:00Z" },
-      { version: "1.4.1", status: "superseded", eval_score: 0.88, anti_gaming_passed: true, at: "2026-08-07T09:02:00Z" },
-    ],
-    pos: { x: 380, y: 108 },
-  },
-  {
-    name: "benefits-agent",
-    version: "1.2.0",
-    owner: "benefits",
-    summary:
-      "Tracks insurance and benefit deadlines, drafts forms. Generates documents; submitting one is always gated on a human.",
-    capability: { input: "BenefitsContext", output: "DraftDocument" },
-    tool_scopes: ["benefits:read", "doc:generate"],
-    callable_by: ["orchestrator"],
-    eval: { suite: "benefits-v2", score: 0.87, cases: 18, anti_gaming_passed: true },
-    promoted_at: "2026-08-09T13:50:00Z",
-    history: [
-      { version: "1.2.0", status: "promoted", eval_score: 0.87, anti_gaming_passed: true, at: "2026-08-09T13:50:00Z" },
-    ],
-    pos: { x: 620, y: 108 },
-  },
-  {
-    name: "watchdog",
-    version: "1.1.3",
-    owner: "audit",
-    summary:
-      "Read-only. Verifies other agents against persisted state, counts steps, detects repeated states, escalates when confidence is low. Cannot act.",
-    capability: { input: "AgentOutput", output: "Verdict" },
-    tool_scopes: ["state:read", "escalation:write"],
-    callable_by: ["orchestrator"],
-    eval: { suite: "verify-v5", score: 0.95, cases: 26, anti_gaming_passed: true },
-    promoted_at: "2026-08-10T07:12:00Z",
-    history: [
-      { version: "1.1.3", status: "promoted", eval_score: 0.95, anti_gaming_passed: true, at: "2026-08-10T07:12:00Z" },
-      { version: "1.1.2", status: "superseded", eval_score: 0.92, anti_gaming_passed: true, at: "2026-08-04T18:30:00Z" },
-    ],
-    pos: { x: 860, y: 108 },
-  },
-];
+/** Layout only. An agent with no entry here is drawn off to the side rather
+ *  than dropped — a fleet that grows should not silently lose a member. */
+const POSITIONS: Record<string, { x: number; y: number }> = {
+  orchestrator: { x: 500, y: 292 },
+  "intake-agent": { x: 140, y: 108 },
+  "meds-agent": { x: 380, y: 108 },
+  "benefits-agent": { x: 620, y: 108 },
+  watchdog: { x: 860, y: 108 },
+};
 
-export const DENIED_EDGES: DeniedEdge[] = [
-  {
-    from: "benefits-agent",
-    to_department: "clinical",
-    resource: "care-note-week3.pdf — clinical visit note",
-    at: "2026-08-09T14:22:00Z",
-    outcome:
-      "Agent Identity refused. The Benefits boundary excludes clinical notes, and no prompt can widen it. The agent fell back to requesting a Family approval, which is the legitimate route.",
-  },
-];
+const FALLBACK_POS = { x: 500, y: 108 };
 
 export const DEPARTMENT_BANDS: {
   id: Department;
@@ -166,3 +86,84 @@ export const DEPARTMENT_BANDS: {
   { id: "benefits", label: "Benefits", x: 510, width: 220, note: "admin + invoices, no clinical" },
   { id: "audit", label: "Audit", x: 750, width: 220, note: "all traces, PII stays tokenised" },
 ];
+
+/** The registry, live. Polled slowly: a catalogue changes when something is
+ *  promoted, which is minutes apart at best. */
+export function useRegistry(): Live<{ agents: ApiAgent[]; scope_owners: ScopeOwners }> & {
+  entries: RegistryEntry[];
+  scopeOwners: ScopeOwners;
+} {
+  const live = useLive<{ agents: ApiAgent[]; scope_owners: ScopeOwners }>("/registry", 60_000);
+  const entries = (live.data?.agents ?? []).map((agent) => ({
+    ...agent,
+    capability: { input: agent.accepts, output: agent.returns },
+    history: agent.versions,
+    pos: POSITIONS[agent.name] ?? FALLBACK_POS,
+  }));
+  return { ...live, entries, scopeOwners: live.data?.scope_owners ?? {} };
+}
+
+/**
+ * What one agent cannot reach, derived from the deployed registry.
+ *
+ * The fleet screen used to draw a hand-written denial event: benefits-agent
+ * reaching for a clinical note and being refused. The refusal mechanism is real
+ * and tested — but that picture was still the wrong one, because a runtime
+ * denial is the *second* layer, and the second layer almost never fires. The
+ * first layer never hands the agent the tool at all, so there is nothing to
+ * call and no event to record. Drawing an event that the design exists to
+ * prevent puts the weakest possible evidence on the screen's central claim.
+ *
+ * So this computes the boundary itself: for each department, the scopes it owns
+ * that this agent does not hold, and therefore the tools it is never given. That
+ * is a fact about the deployment, it comes from the deployment, and it is true
+ * whether or not anything has been refused today.
+ */
+export function useBoundaries(agent: RegistryEntry | undefined, scopeOwners: ScopeOwners) {
+  if (!agent) return [] as DeniedEdge[];
+
+  const held = new Set(agent.tool_scopes);
+  const byDepartment = new Map<Department, string[]>();
+
+  for (const [scope, owner] of Object.entries(scopeOwners)) {
+    if (!owner || owner === agent.owner || held.has(scope)) continue;
+    byDepartment.set(owner as Department, [...(byDepartment.get(owner as Department) ?? []), scope]);
+  }
+
+  return [...byDepartment.entries()].map(([department, scopes]) => ({
+    from: agent.name,
+    to_department: department,
+    resource: scopes.join(", "),
+    at: "",
+    outcome: `${agent.name} is never handed a tool requiring ${scopes.join(" or ")}. The belt is assembled from its registry scopes, so there is no declaration for it to call — and if that wiring were ever wrong, every call is re-checked against the same scopes before it runs.`,
+  }));
+}
+
+export type ScopeOwners = Record<string, string | null>;
+
+/** Runtime refusals, if any have happened. Layer two doing its job leaves a
+ *  record; an empty list means layer one has held, which is the normal case. */
+export function useRuntimeDenials(): DeniedEdge[] {
+  const live = useLive<{ entries: AuditRow[] }>("/audit?limit=200", 30_000);
+  const rows = live.data?.entries ?? [];
+
+  return rows
+    .filter((e) => e.action === "tool.denied" || e.action === "delegation.not_permitted")
+    .map((e) => {
+      const details = e.details ?? {};
+      return {
+        from: (e.actor ?? "unknown") as AgentName,
+        to_department: (details.boundary ?? "clinical") as Department,
+        resource: String(details.tool ?? details.requested ?? "a tool"),
+        at: e.at ?? "",
+        outcome: `Refused at call time. ${details.tool ?? "The tool"} requires ${details.required_scope ?? "a scope"}, which belongs to the ${details.boundary ?? "another"} boundary.`,
+      };
+    });
+}
+
+interface AuditRow {
+  actor?: string;
+  action?: string;
+  at?: string;
+  details?: Record<string, string | undefined>;
+}

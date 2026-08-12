@@ -2,11 +2,10 @@
 
 import { useCallback, useState } from "react";
 import { ScreenIntro } from "@/components/ScreenIntro";
-import { SourceBadge } from "@/components/SourceBadge";
-import { decideApproval, isConfigured } from "@/lib/api";
-import { useLoaded } from "@/lib/live";
-import { APPROVALS } from "@/lib/mock";
-import { DEPARTMENT_LABEL, type Approval, type Department } from "@/lib/types";
+import { ErrorScreen, LoadingScreen } from "@/components/Screen";
+import { decideApproval } from "@/lib/api";
+import { useLive } from "@/lib/live";
+import { DEPARTMENT_LABEL, type Department } from "@/lib/types";
 
 /**
  * Approvals — medium density.
@@ -189,13 +188,7 @@ export default function ApprovalsPage() {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const loaded = useLoaded<{ approvals: LiveApproval[] }>(
-    "/approvals?status=pending",
-    { approvals: [] },
-    15_000,
-  );
-  const live = isConfigured() && loaded.source === "live";
-  const pending = live ? loaded.data.approvals : [];
+  const loaded = useLive<{ approvals: LiveApproval[] }>("/approvals?status=pending", 15_000);
 
   const decide = useCallback(async (id: string, approved: boolean) => {
     setBusy(id);
@@ -210,7 +203,15 @@ export default function ApprovalsPage() {
     }
   }, []);
 
-  const count = live ? pending.length : APPROVALS.length;
+  if (loaded.status === "loading") return <LoadingScreen what="the approvals queue" />;
+  if (loaded.status === "error" || !loaded.data) {
+    return (
+      <ErrorScreen what="the approvals queue" error={loaded.error} onRetry={loaded.retry} />
+    );
+  }
+
+  const pending = loaded.data.approvals;
+  const count = pending.length;
 
   return (
     <div data-density="calm" className="h-full overflow-y-auto">
@@ -219,12 +220,16 @@ export default function ApprovalsPage() {
           title="Waiting on you"
           aside={
             <>
-              <SourceBadge source={live ? "live" : "fixture"} error={loaded.error} />
+              {loaded.error && (
+                <span className="chip chip-wait" title={loaded.error}>
+                  reconnecting
+                </span>
+              )}
               <span className="eyebrow">{count} pending</span>
             </>
           }
         >
-          {live && count === 0 ? (
+          {count === 0 ? (
             <>
               Nothing is waiting. Everything the fleet did, it did on its own — and every one
               of those decisions is on the Trace screen if you want to check it.
@@ -245,39 +250,23 @@ export default function ApprovalsPage() {
         )}
 
         <div className="space-y-4">
-          {live
-            ? pending.map((a) => (
-                <Card
-                  key={a.id}
-                  id={a.id}
-                  requestedBy={a.requested_by}
-                  department={DEPARTMENT_OF[a.requested_by] ?? "family"}
-                  action={a.action}
-                  gateReason={a.gate_reason}
-                  ruleId={a.rule_id}
-                  risk={a.risk}
-                  confidence={a.confidence}
-                  runId={a.run_id}
-                  decided={decided[a.id]}
-                  busy={busy === a.id}
-                  onDecide={(approved) => decide(a.id, approved)}
-                />
-              ))
-            : APPROVALS.map((a: Approval) => (
-                <Card
-                  key={a.id}
-                  id={a.id}
-                  requestedBy={a.requested_by}
-                  department={a.department}
-                  action={a.action}
-                  rationale={a.rationale}
-                  gateReason={a.gate_reason}
-                  risk={a.risk}
-                  confidence={a.confidence}
-                  evidence={a.evidence}
-                  runId={a.run_id}
-                />
-              ))}
+          {pending.map((a) => (
+            <Card
+              key={a.id}
+              id={a.id}
+              requestedBy={a.requested_by}
+              department={DEPARTMENT_OF[a.requested_by] ?? "family"}
+              action={a.action}
+              gateReason={a.gate_reason}
+              ruleId={a.rule_id}
+              risk={a.risk}
+              confidence={a.confidence}
+              runId={a.run_id}
+              decided={decided[a.id]}
+              busy={busy === a.id}
+              onDecide={(approved) => decide(a.id, approved)}
+            />
+          ))}
         </div>
       </div>
     </div>
